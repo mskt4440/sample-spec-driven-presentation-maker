@@ -92,7 +92,7 @@ The **active style** is the Source of Truth for design tokens. Resolution order:
 1. `specs/art-direction.html` in the project directory (created by Phase 1) — if present, this is the active style. It is a living document: new tokens can be added during Phase 2 when the design requires values not yet defined (e.g. a new accent color for a diagram, a new font size role). Add the token to `:root` first, then use it in slide JSON.
 2. Global default style from `~/.kiro/local/pptx-assets/styles/` — used as starting point when no project style exists
 
-Every `fontSize` and hex color in `presentation.json` **must** come from a token defined in
+Every `fontSize` and hex color in the slide JSON **must** come from a token defined in
 the active style's `:root`. No ad-hoc values.
 
 - **fontSize** — use only values that appear as `--fs-*` variables (e.g. 14, 20, 24, 28, 36, 48).
@@ -102,7 +102,8 @@ the active style's `:root`. No ad-hoc values.
     Out-of-token values produce warnings (build still succeeds). Resolve before delivery.
 - **hex color** — use only values that appear as `--*` color variables. If the design needs a
   color that doesn't exist, add a new token to art-direction.html first, then use it.
-- Colors embedded in inline directives (e.g. `{{#FF9900:text}}`) are subject to the same rule.
+  Colors embedded in inline directives (e.g. `{{#FF9900:text}}`) are subject to the same rule.
+  - Not automatically validated at build time — self-check before delivery.
 - After composing all slides, run the project's drift analysis (if available) to verify
   zero undefined tokens remain.
 
