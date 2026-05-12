@@ -39,8 +39,18 @@ _ALLOWED_URL_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "ima
 _SESSION_TTL_DAYS = 7
 
 
+def _convert_webp_to_png(data: bytes) -> bytes:
+    """Convert webp image bytes to PNG for PPTX compatibility."""
+    img = PILImage.open(io.BytesIO(data))
+    img = img.convert("RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _deck_root() -> Path:
-    return Path(os.environ.get("SDPM_DECK_ROOT", "")) or Path.home() / "Documents" / "SDPM-Presentations"
+    root = os.environ.get("SDPM_DECK_ROOT", "")
+    return Path(root) if root else Path.home() / "Documents" / "SDPM-Presentations"
 
 
 def _session_dir(session_id: str) -> Path:
@@ -88,6 +98,39 @@ def cleanup_old_sessions(ttl_days: int = _SESSION_TTL_DAYS) -> int:
     return count
 
 
+def _analyze_colors(file_path: Path) -> dict | None:
+    """Analyze dominant colors of an image. Returns None on failure."""
+    try:
+        img = PILImage.open(file_path).convert("RGB")
+        small = img.resize((100, 100))
+        pixels = list(small.getdata())
+
+        # Brightness (luminance average)
+        lum_sum = sum(r * 0.299 + g * 0.587 + b * 0.114 for r, g, b in pixels)
+        lum_avg = lum_sum / len(pixels)
+        brightness = "dark" if lum_avg < 100 else "light" if lum_avg > 155 else "mixed"
+
+        # Saturation (HSV S channel average)
+        hsv = img.resize((100, 100)).convert("HSV")
+        hsv_pixels = list(hsv.getdata())
+        s_avg = sum(s for _, s, _ in hsv_pixels) / len(hsv_pixels)
+        saturation = "monochrome" if s_avg < 30 else "muted" if s_avg < 100 else "vivid"
+
+        # Palette: quantize to 5 colors
+        quantized = small.quantize(colors=5, method=PILImage.Quantize.MEDIANCUT)
+        palette_data = quantized.getpalette()
+        color_counts = sorted(quantized.getcolors(), reverse=True)
+        total = sum(count for count, _ in color_counts)
+        palette = []
+        for count, idx in color_counts[:5]:
+            r, g, b = palette_data[idx * 3], palette_data[idx * 3 + 1], palette_data[idx * 3 + 2]
+            palette.append({"hex": f"#{r:02X}{g:02X}{b:02X}", "ratio": round(count / total, 2)})
+
+        return {"palette": palette, "brightness": brightness, "saturation": saturation}
+    except Exception:
+        return None
+
+
 def upload_file(session_id: str, file_path: str, filename: str = "") -> str:
     """Convert and store a file in session storage.
 
@@ -97,7 +140,7 @@ def upload_file(session_id: str, file_path: str, filename: str = "") -> str:
         filename: Original filename (defaults to basename of file_path).
 
     Returns:
-        JSON with {uploadId, fileName, fileType, status, warnings?}.
+        JSON with {uploadId, fileName, fileType, status, filePath?, colorAnalysis?}.
     """
     src = Path(file_path)
     if not src.exists():
@@ -140,7 +183,7 @@ def upload_file(session_id: str, file_path: str, filename: str = "") -> str:
     (upload_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
     upload_id = f"{session_id}/{short_id}_{original_name}"
-    response = {
+    response: dict = {
         "uploadId": upload_id,
         "fileName": original_name,
         "fileType": file_type,
@@ -150,6 +193,28 @@ def upload_file(session_id: str, file_path: str, filename: str = "") -> str:
         response["warnings"] = meta["warnings"]
     if meta.get("error"):
         response["error"] = meta["error"]
+
+    # Add filePath for direct agent access (Local/ACP only)
+    if meta["status"] == "completed":
+        response["filePath"] = str((upload_dir / original_name).resolve())
+    elif meta["status"] == "converted":
+        stem = original_name.rsplit(".", 1)[0] if "." in original_name else original_name
+        md_path = upload_dir / f"{stem}.md"
+        json_path = upload_dir / "slides.json"
+        if md_path.exists():
+            response["filePath"] = str(md_path.resolve())
+        elif json_path.exists():
+            response["filePath"] = str(json_path.resolve())
+        images_dir = upload_dir / "images"
+        if images_dir.exists():
+            response["imagesDir"] = str(images_dir.resolve())
+
+    # Color analysis for images
+    if file_type.startswith("image/") and meta["status"] == "completed":
+        colors = _analyze_colors(upload_dir / original_name)
+        if colors:
+            response["colorAnalysis"] = colors
+
     return json.dumps(response, ensure_ascii=False)
 
 
@@ -324,7 +389,13 @@ def _import_from_upload(upload_id: str, deck_id: str, filename: str) -> str:
         dest_name = f"{short_id}_{file_name}"
         if file_type.startswith("image/"):
             images_dir.mkdir(exist_ok=True)
-            shutil.copy2(src_path, images_dir / dest_name)
+            # Convert webp to PNG for PPTX compatibility
+            if src_path.suffix.lower() == ".webp":
+                png_data = _convert_webp_to_png(src_path.read_bytes())
+                dest_name = f"{short_id}_{Path(file_name).stem}.png"
+                (images_dir / dest_name).write_bytes(png_data)
+            else:
+                shutil.copy2(src_path, images_dir / dest_name)
             result["files"].append(f"images/{dest_name}")
             result["image_mapping"][file_name] = f"images/{dest_name}"
         else:
@@ -365,6 +436,11 @@ def _import_from_url(url: str, deck_id: str, filename: str) -> str:
     dest_name = f"{short_id}_{filename}"
     images_dir = deck_dir / "images"
     images_dir.mkdir(exist_ok=True)
+    # Convert webp to PNG for PPTX compatibility
+    if ct == "image/webp" or filename.lower().endswith(".webp"):
+        data = _convert_webp_to_png(data)
+        filename = Path(filename).stem + ".png"
+        dest_name = f"{short_id}_{filename}"
     (images_dir / dest_name).write_bytes(data)
     return json.dumps({
         "source": url,
