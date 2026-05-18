@@ -54,6 +54,7 @@ interface AnimatedSlidePreviewProps {
   composeUrl: string
   slug?: string
   skipAnimation?: boolean
+  knownUrl?: string | null
   onAnimate?: () => void
   onComplete?: () => void
   fallback?: React.ReactNode
@@ -68,7 +69,7 @@ function assignAgent(comp: ComposeComponent) {
   return AGENTS[4]
 }
 
-export function AnimatedSlidePreview({ defsUrl, composeUrl, slug, skipAnimation, onAnimate, onComplete, fallback }: AnimatedSlidePreviewProps) {
+export function AnimatedSlidePreview({ defsUrl, composeUrl, slug, skipAnimation, knownUrl, onAnimate, onComplete, fallback }: AnimatedSlidePreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const intervalsRef = useRef<number[]>([])
@@ -92,6 +93,7 @@ export function AnimatedSlidePreview({ defsUrl, composeUrl, slug, skipAnimation,
   const composeUrlRef = useRef(composeUrl)
   const defsUrlRef = useRef(defsUrl)
   const skipRef = useRef(skipAnimation)
+  const knownUrlRef = useRef(knownUrl?.split("?")[0] || null)
   composeUrlRef.current = composeUrl
   defsUrlRef.current = defsUrl
   skipRef.current = skipAnimation
@@ -107,10 +109,7 @@ export function AnimatedSlidePreview({ defsUrl, composeUrl, slug, skipAnimation,
       if (!compUrlBase) return
       if (compUrlBase === lastComposeUrlRef.current) return
       if (animatingRef.current) return  // defer until animation completes
-      // Skip only on the first URL seen after mount (initial load for existing
-      // deck). Subsequent URL changes (user edits) always animate.
-      const isFirstUrl = !lastComposeUrlRef.current
-      const skipThisUpdate = skipRef.current && isFirstUrl
+      const skipThisUpdate = skipRef.current || compUrlBase === knownUrlRef.current
       lastComposeUrlRef.current = compUrlBase
       setError(false)
 
@@ -139,6 +138,10 @@ export function AnimatedSlidePreview({ defsUrl, composeUrl, slug, skipAnimation,
           if (!container || cancelled) return
 
           cleanup()
+          setError(false)
+          // Immediately hide fallback (React re-render is async)
+          const fb = container.parentElement?.querySelector("[data-fallback]") as HTMLElement | null
+          if (fb) fb.style.display = "none"
 
           const animTargets = new Set<number>()
           if (!skipThisUpdate) {
@@ -295,7 +298,7 @@ export function AnimatedSlidePreview({ defsUrl, composeUrl, slug, skipAnimation,
   return (
     <div data-slide-id={slug} className="aspect-[16/9] relative overflow-hidden rounded-lg bg-black">
       <div ref={containerRef} className="absolute inset-0" data-slide-id={slug} />
-      {error && fallback && <div className="absolute inset-0">{fallback}</div>}
+      {error && fallback && <div data-fallback className="absolute inset-0">{fallback}</div>}
     </div>
   )
 }
