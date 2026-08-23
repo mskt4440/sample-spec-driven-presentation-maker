@@ -6,7 +6,7 @@ Security: AWS manages infrastructure security. You manage access control,
 data classification, and IAM policies. See SECURITY.md for details.
 
 Single source of truth for PK/SK patterns and GSI configuration.
-All DDB access in api/ and mcp-server/ should use these helpers
+All DDB access in api/ and servers/remote/ should use these helpers
 instead of hardcoding key strings.
 """
 
@@ -76,18 +76,6 @@ def template_pk(template_id: str) -> str:
     return f"TEMPLATE#{template_id}"
 
 
-def upload_sk(upload_id: str) -> str:
-    """Sort key for an upload record.
-
-    Args:
-        upload_id: Upload identifier.
-
-    Returns:
-        SK string in format UPLOAD#{upload_id}.
-    """
-    return f"UPLOAD#{upload_id}"
-
-
 # ---------------------------------------------------------------------------
 # Key prefix constants (for begins_with queries)
 # ---------------------------------------------------------------------------
@@ -95,7 +83,6 @@ def upload_sk(upload_id: str) -> str:
 DECK_SK_PREFIX = "DECK#"
 FAV_SK_PREFIX = "FAV#"
 TEMPLATE_PK_PREFIX = "TEMPLATE#"
-UPLOAD_SK_PREFIX = "UPLOAD#"
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +130,36 @@ def extract_fav_id(sk: str) -> str:
         The deck_id portion.
     """
     return sk.replace(FAV_SK_PREFIX, "")
+
+
+# ---------------------------------------------------------------------------
+# Item builders
+# ---------------------------------------------------------------------------
+
+
+def theme_hints_ddb_item(theme_hints: dict | None) -> dict:
+    """Build the DynamoDB ``themeHints`` attribute from a ConversionResult.
+
+    Tolerates ``theme_hints=None`` (shared.ingest continues with a warning
+    when theme extraction fails) so a successful conversion is never
+    reported as failed. DynamoDB rejects native floats, so
+    ``backgroundLuminance`` is round-tripped via ``str(Decimal)``.
+
+    Args:
+        theme_hints: ``ConversionResult.theme_hints`` — may be None.
+
+    Returns:
+        Dict with backgroundLuminance (Decimal | None), accentColors, fonts.
+    """
+    from decimal import Decimal
+
+    hints = theme_hints or {}
+    bg_lum = hints.get("backgroundLuminance")
+    return {
+        "backgroundLuminance": Decimal(str(bg_lum)) if bg_lum is not None else None,
+        "accentColors": hints.get("accentColors", []),
+        "fonts": hints.get("fonts", {}),
+    }
 
 
 

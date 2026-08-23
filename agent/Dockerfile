@@ -7,13 +7,15 @@ WORKDIR /app
 ENV UV_SYSTEM_PYTHON=1 \
     UV_COMPILE_BYTECODE=1
 
-COPY requirements.txt .
-RUN uv pip install --no-cache -r requirements.txt
+# requirements.lock pins the full dependency tree for reproducible image builds
+# (see the mcp 2.0 breakage). Regenerate with `make lock` after editing requirements.txt.
+COPY requirements.lock .
+RUN uv pip install --no-cache -r requirements.lock
 
 RUN useradd -m -u 1000 bedrock_agentcore
 USER bedrock_agentcore
 
-COPY basic_agent.py cost_logger.py factory.py composition.py mcp_clients.py model_profiles.py resilience.py session.py streaming.py ./
+COPY basic_agent.py cost_logger.py errors.py factory.py composition.py mcp_clients.py mantle_client.py model_profiles.py resilience.py session.py streaming.py ./
 COPY prompts/ prompts/
 COPY modes/ modes/
 COPY tools/ tools/

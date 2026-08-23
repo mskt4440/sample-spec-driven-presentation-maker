@@ -13,23 +13,38 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v8.0.0
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Lint
-        run: uv run ruff check skill/ mcp-local/ mcp-server/ shared/ api/
+        run: uv run ruff check sdpm/ servers/ shared/ api/ agent/
       - name: Test
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --cov=sdpm --cov-report=term
+
+  # Local-surface guard: boots servers/local over real stdio (no mocks) and
+  # exercises filesystem-anchored resolution (templates, personas). The unit
+  # suite mocks this surface, so regressions here used to slip through.
+  local-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9.0.0
+      - name: Smoke test local MCP server
+        run: uv run python scripts/smoke_local.py
 
   web-ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web-ui/package-lock.json
       - name: Install
@@ -38,28 +53,49 @@ jobs:
       - name: Lint
         run: npm run lint
         working-directory: web-ui
-      - name: Check for undefined references
-        run: |
-          # Catch "Cannot find name" errors that cause runtime crashes
-          # Full tsc --noEmit is not yet clean; this targets the most critical class
-          ERRORS=$(npx tsc --noEmit 2>&1 | grep "Cannot find name" || true)
-          if [ -n "$ERRORS" ]; then
-            echo "$ERRORS"
-            echo "::error::Undefined references found — these will crash at runtime"
-            exit 1
-          fi
+      - name: Type check
+        run: npx tsc --noEmit
+        working-directory: web-ui
+      - name: Test
+        run: npm test
         working-directory: web-ui
       - name: Build
         run: npm run build:cloud
         working-directory: web-ui
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: web-ui
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+        working-directory: web-ui
+      - name: E2E test
+        run: npm run test:e2e
+        working-directory: web-ui
+      - name: Upload trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: web-ui/test-results/
+          retention-days: 7
+
   infra:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: infra/package-lock.json
       - name: Install
@@ -68,12 +104,48 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
         working-directory: infra
+      # cdk synth catches template-level errors that tsc cannot (e.g. invalid
+      # lifecycle rule combinations only fail at CloudFormation/S3 API time,
+      # but synth at least validates construct-level constraints and config).
+      - name: Synth
+        # config.yaml is a local deployment setting (gitignored) — synth against
+        # the committed example config.
+        run: |
+          cp config.example.yaml config.yaml
+          npx cdk synth --quiet
+        working-directory: infra
+
+  # Deploy-surface guard: the runtime docker builds resolve Python deps with
+  # pip against committed lockfiles. CI has no docker build, so a lockfile
+  # that pip cannot satisfy (e.g. a Dependabot bump contradicting a
+  # transitive hard pin — cachetools/protobuf under aws-opentelemetry-distro,
+  # 2026-08-02) used to surface only at deploy time. Reproduce the exact
+  # docker-side installs as dry runs here.
+  container-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v9.0.0
+      - name: Remote server image deps resolve (mirrors servers/remote/Dockerfile)
+        run: |
+          uv venv /tmp/remote-check --python 3.13
+          VIRTUAL_ENV=/tmp/remote-check uv pip install --dry-run \
+            -c servers/remote/constraints.txt ./sdpm ./servers/remote
+      - name: Agent image deps resolve (mirrors agent/Dockerfile)
+        run: |
+          uv venv /tmp/agent-check --python 3.13
+          VIRTUAL_ENV=/tmp/agent-check uv pip install --dry-run \
+            -r agent/requirements.lock
 
   guard:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Deny cdk.context.json
         run: |
           if [ -f "infra/cdk.context.json" ]; then

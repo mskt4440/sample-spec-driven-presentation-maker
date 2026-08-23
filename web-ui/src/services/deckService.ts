@@ -38,6 +38,8 @@ export interface DeckDetail {
   name: string
   slideOrder: string[]
   slides: SlidePreview[]
+  /** Confirmed template from deck.json (e.g. "corporate.pptx"), null when unconfirmed. */
+  template?: string | null
   defsUrl?: string | null
   pptxUrl: string | null
   specs?: SpecFiles | null
@@ -195,35 +197,41 @@ export interface ChatMessage {
   timestamp: number
 }
 
+export interface ChatHistoryResult {
+  messages: ChatMessage[]
+  /** True when the backend dropped oldest messages to fit the response size limit. */
+  truncated: boolean
+}
+
 /**
  * Fetch chat history for a session.
  *
  * @param sessionId - Conversation session ID
  * @param idToken - Cognito ID token
- * @returns Array of chat messages sorted by timestamp
+ * @returns Messages sorted by timestamp, plus a truncation flag
  */
-export async function getChatHistory(sessionId: string, idToken: string, deckId?: string): Promise<ChatMessage[]> {
+export async function getChatHistory(sessionId: string, idToken: string, deckId?: string): Promise<ChatHistoryResult> {
   if (IS_LOCAL) {
-    if (!deckId || deckId === "new") return []
+    if (!deckId || deckId === "new") return { messages: [], truncated: false }
     // Load session context + saved messages
     const res = await fetch("/api/agent/load", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId, deckId }),
     })
-    if (!res.ok) return []
+    if (!res.ok) return { messages: [], truncated: false }
     const data = await res.json()
-    return data.messages || []
+    return { messages: data.messages || [], truncated: false }
   }
   const base = await getApiBaseUrl()
   const response = await fetch(`${base}chat/${sessionId}`, {
     headers: { Authorization: `Bearer ${idToken}` },
   })
 
-  if (!response.ok) return []
+  if (!response.ok) return { messages: [], truncated: false }
 
   const data = await response.json()
-  return data.messages || []
+  return { messages: data.messages || [], truncated: data.truncated === true }
 }
 
 /**
@@ -432,7 +440,7 @@ export async function batchGetSlidePreviewUrls(
 export interface StyleEntry {
   name: string
   description: string
-  coverHtml: string
+  html: string
   pinned: boolean
   source: "builtin" | "user"
 }
@@ -558,24 +566,22 @@ export async function fetchTemplates(idToken: string): Promise<TemplateEntry[]> 
   return (data.templates || []) as TemplateEntry[]
 }
 
-/** Download a template .pptx file. */
+/** Download a template .pptx file via direct navigation (no CORS dependency). */
 export async function downloadTemplate(name: string, idToken: string): Promise<void> {
   const base = await getApiBaseUrl()
   const res = await fetch(`${base}templates/${encodeURIComponent(name)}`, {
     headers: { Authorization: `Bearer ${idToken}` },
   })
-  if (!res.ok) return
-  const { downloadUrl } = await res.json()
-  if (!downloadUrl) return
-  const fileRes = await fetch(downloadUrl)
-  if (!fileRes.ok) return
-  const blob = await fileRes.blob()
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url
-  a.download = `${name}.pptx`
-  a.click()
-  URL.revokeObjectURL(url)
+  if (!res.ok) {
+    throw new Error(`Failed to get download URL: ${res.status}`)
+  }
+  const data = await res.json()
+  if (data.error || !data.downloadUrl) {
+    throw new Error(data.error || "No download URL returned")
+  }
+  // Direct navigation — Content-Disposition on the presigned URL triggers download.
+  // Same approach as deck PPTX download (WorkspaceView.tsx), no CORS needed.
+  window.location.href = data.downloadUrl
 }
 
 /** Upload a user template. */
@@ -632,6 +638,17 @@ export async function deleteTemplate(name: string, idToken: string): Promise<{ d
 export async function updateTemplateDescription(name: string, description: string, idToken: string): Promise<{ updated?: string; error?: string }> {
   const base = await getApiBaseUrl()
   const res = await fetch(`${base}templates/user/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+    body: JSON.stringify({ description }),
+  })
+  return res.json()
+}
+
+/** Update the current user's note for a builtin template. */
+export async function updateBuiltinTemplateNote(name: string, description: string, idToken: string): Promise<{ updated?: string; error?: string }> {
+  const base = await getApiBaseUrl()
+  const res = await fetch(`${base}templates/builtin/${encodeURIComponent(name)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
     body: JSON.stringify({ description }),

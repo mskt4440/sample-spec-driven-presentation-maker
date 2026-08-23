@@ -25,10 +25,16 @@ from aws_lambda_powertools import Logger, Metrics
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver, CORSConfig
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from boto3.dynamodb.conditions import Key
+from botocore.config import Config as BotoConfig
 from authz import authorize
+from chat_history import (
+    cap_messages_size,
+    strip_tool_result_content,
+    truncate_tool_inputs,
+)
 from common import get_user_id, now_iso, presigned_url
 from shared.schema import (
-    deck_pk, deck_sk, shared_pk, fav_sk, upload_sk,
+    deck_pk, deck_sk, shared_pk, fav_sk,
     DECK_SK_PREFIX, FAV_SK_PREFIX,
     extract_deck_id, extract_fav_id,
     GSI_PUBLIC_DECKS, public_gsi1pk,
@@ -91,7 +97,7 @@ logger = Logger()
 metrics = Metrics()
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
-s3_client = boto3.client("s3")
+s3_client = boto3.client("s3", config=BotoConfig(signature_version="s3v4"))
 app = APIGatewayHttpResolver(cors=cors_config)
 
 # --- KB (optional) ---
@@ -218,43 +224,14 @@ def _deck_summary(item: Dict, extras: Dict[str, Dict]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _extract_cover_html(html: str) -> str:
-    """Extract <head> + first <div class="slide..."> from a style HTML.
-
-    Args:
-        html: Full style HTML string.
-
-    Returns:
-        Minimal HTML with styles and first slide only.
-    """
-    head_end = html.find("</head>")
-    if head_end == -1:
-        return ""
-    # Match <div class="slide"> or <div class="slide ..."> (additional classes)
-    slide_pattern = re.compile(r'<div class="slide[\s"]')
-    matches = list(slide_pattern.finditer(html))
-    if not matches:
-        return ""
-    first_slide = matches[0].start()
-    end = matches[1].start() if len(matches) > 1 else html.find("</body>", first_slide)
-    if end == -1:
-        end = len(html)
-    return (
-        html[: head_end + 7]
-        + '\n<body style="margin:0;padding:0;background:transparent;overflow:hidden">\n'
-        + html[first_slide:end].strip()
-        + "\n</body></html>"
-    )
-
-
 @app.get("/styles")
 def list_styles() -> Dict[str, Any]:
-    """List available styles with cover slide HTML for preview.
+    """List available styles with full HTML for client-side rendering.
 
     Includes builtin styles and user styles with pin/source metadata.
 
     Returns:
-        Dict with styles list (name, description, coverHtml, pinned, source).
+        Dict with styles list (name, description, html, pinned, source).
     """
     user_id = get_user_id(app.current_event)
 
@@ -274,7 +251,7 @@ def list_styles() -> Dict[str, Any]:
             m = re.search(r"<title>(.*?)</title>", body, re.IGNORECASE)
             if m:
                 description = m.group(1).strip()
-            builtin.append({"name": name, "description": description, "coverHtml": _extract_cover_html(body), "source": "builtin"})
+            builtin.append({"name": name, "description": description, "html": body, "source": "builtin"})
         _styles_cache = builtin
 
     all_styles: List[Dict[str, Any]] = list(_styles_cache or [])
@@ -293,7 +270,7 @@ def list_styles() -> Dict[str, Any]:
             m = re.search(r"<title>(.*?)</title>", body, re.IGNORECASE)
             if m:
                 description = m.group(1).strip()
-            all_styles.append({"name": name, "description": description, "coverHtml": _extract_cover_html(body), "source": "user"})
+            all_styles.append({"name": name, "description": description, "html": body, "source": "user"})
     except Exception:
         pass
 
@@ -496,6 +473,18 @@ def list_templates() -> Dict[str, Any]:
         for item in resp.get("Responses", {}).get(table.name, []):
             ddb_cache[item["name"]] = item
 
+    # Per-user notes overlay builtin metadata without modifying shared cache rows.
+    builtin_notes: Dict[str, str] = {}
+    if s3_templates:
+        resp = table.query(
+            KeyConditionExpression=Key("PK").eq(f"USER#{user_id}")
+            & Key("SK").begins_with("BUILTIN_NOTE#"),
+        )
+        builtin_notes = {
+            item["SK"].removeprefix("BUILTIN_NOTE#"): item.get("description", "")
+            for item in resp.get("Items", [])
+        }
+
     # Build builtin list with lazy analysis
     to_analyze: List[str] = []
     for name, etag in s3_templates.items():
@@ -508,7 +497,7 @@ def list_templates() -> Dict[str, Any]:
             templates.append({
                 "name": name,
                 "source": "builtin",
-                "description": cached.get("description", ""),
+                "description": builtin_notes.get(name, cached.get("description", "")),
                 "theme_colors": analysis.get("theme_colors", {}),
                 "fonts": cached.get("fonts", {}),
                 "layout_count": len(analysis.get("layouts", [])),
@@ -518,7 +507,7 @@ def list_templates() -> Dict[str, Any]:
             templates.append({
                 "name": name,
                 "source": "builtin",
-                "description": "",
+                "description": builtin_notes.get(name, ""),
                 "theme_colors": {},
                 "fonts": {},
                 "layout_count": 0,
@@ -526,7 +515,7 @@ def list_templates() -> Dict[str, Any]:
 
     # Lazy analyze uncached builtins (async would be better but keep simple)
     if to_analyze:
-        from sdpm.analyzer import analyze_template as _analyze
+        from sdpm.engine.analyzer import analyze_template as _analyze
 
         tmp = Path(tempfile.mkdtemp())
         for name in to_analyze:
@@ -542,10 +531,7 @@ def list_templates() -> Dict[str, Any]:
                 "s3Key": s3_key,
                 "s3ETag": etag,
                 "fonts": analysis.get("fonts", {}),
-                "analysisJson": json.dumps({
-                    "theme_colors": analysis.get("theme_colors", {}),
-                    "layouts": analysis.get("layouts", []),
-                }),
+                "analysisJson": json.dumps(analysis, ensure_ascii=False),
             }
             table.put_item(Item=item)
             # Update the placeholder in templates list
@@ -582,12 +568,20 @@ def download_template(name: str) -> Any:
     """Download a template .pptx file. Searches user templates first, then builtin."""
     user_id = get_user_id(app.current_event)
 
+    disposition = f'attachment; filename="{name}.pptx"'
+
     # Try user template
     user_key = f"user-templates/{user_id}/{name}.pptx"
     try:
         s3_client.head_object(Bucket=BUCKET_NAME, Key=user_key)
         url = s3_client.generate_presigned_url(
-            "get_object", Params={"Bucket": BUCKET_NAME, "Key": user_key}, ExpiresIn=300
+            "get_object",
+            Params={
+                "Bucket": BUCKET_NAME,
+                "Key": user_key,
+                "ResponseContentDisposition": disposition,
+            },
+            ExpiresIn=300,
         )
         return {"downloadUrl": url}
     except Exception:
@@ -598,11 +592,51 @@ def download_template(name: str) -> Any:
     try:
         s3_client.head_object(Bucket=RESOURCE_BUCKET, Key=builtin_key)
         url = s3_client.generate_presigned_url(
-            "get_object", Params={"Bucket": RESOURCE_BUCKET, "Key": builtin_key}, ExpiresIn=300
+            "get_object",
+            Params={
+                "Bucket": RESOURCE_BUCKET,
+                "Key": builtin_key,
+                "ResponseContentDisposition": disposition,
+            },
+            ExpiresIn=300,
         )
         return {"downloadUrl": url}
     except Exception:
         return {"error": "Template not found"}, 404
+
+
+@app.patch("/templates/builtin/<name>")
+def patch_builtin_template_note(name: str) -> Dict[str, Any]:
+    """Create, update, or clear the current user's note for a builtin template.
+
+    Body: {"description": str}. Blank descriptions clear the user overlay.
+    """
+    user_id = get_user_id(app.current_event)
+    body = app.current_event.json_body or {}
+    description_raw = body.get("description")
+    if not isinstance(description_raw, str):
+        return {"error": "Description must be a string"}, 400
+    if not name or not re.fullmatch(r"[a-zA-Z0-9_\-\s.()]+", name):
+        return {"error": "Invalid template name"}, 400
+
+    # Notes can only target builtin templates that currently exist in S3.
+    try:
+        s3_client.head_object(Bucket=RESOURCE_BUCKET, Key=f"templates/{name}.pptx")
+    except Exception:
+        return {"error": "Template not found"}, 404
+
+    key = {"PK": f"USER#{user_id}", "SK": f"BUILTIN_NOTE#{name}"}
+    description = description_raw.strip()
+    if not description:
+        table.delete_item(Key=key)
+    else:
+        table.put_item(Item={
+            **key,
+            "name": name,
+            "description": description,
+            "updatedAt": now_iso(),
+        })
+    return {"updated": name, "description": description}
 
 
 @app.post("/templates/user/upload-url")
@@ -665,16 +699,13 @@ def upload_user_template() -> Dict[str, Any]:
     tpl_path = tmp / f"{name}.pptx"
     s3_client.download_file(BUCKET_NAME, s3_key, str(tpl_path))
 
-    from sdpm.analyzer import analyze_template as _analyze
+    from sdpm.engine.analyzer import analyze_template as _analyze
 
     analysis = _analyze(tpl_path)
     metadata = {
         "description": description,
         "fonts": analysis.get("fonts", {}),
-        "analysisJson": json.dumps({
-            "theme_colors": analysis.get("theme_colors", {}),
-            "layouts": analysis.get("layouts", []),
-        }),
+        "analysisJson": json.dumps(analysis, ensure_ascii=False),
     }
 
     # Store in DDB
@@ -974,12 +1005,21 @@ def get_deck(deck_id: str) -> Dict[str, Any]:
             pass
     specs["artDirection"] = art_direction_content
 
+    # Confirmed template name from deck.json (written by the agent at Art Direction)
+    template = None
+    try:
+        dj_resp = s3_client.get_object(Bucket=BUCKET_NAME, Key=f"decks/{deck_id}/deck.json")
+        template = json.loads(dj_resp["Body"].read()).get("template") or None
+    except Exception:
+        pass
+
     return {
         "deckId": deck_id,
         "name": deck.get("name", "Untitled"),
         "slideCount": len(slides),
         "slides": slides,
         "specs": specs,
+        "template": template,
         "defsUrl": preview_url(defs_key) if has_defs else None,
         "pptxUrl": (_cf_signed_url(pptx_key) or presigned_url(s3_client, BUCKET_NAME, pptx_key)) if pptx_key else None,
         "updatedAt": deck.get("updatedAt", ""),
@@ -1253,14 +1293,18 @@ def get_chat(session_id: str) -> Dict[str, Any]:
         # Strands stores events in reverse chronological order
         messages.reverse()
 
-        # Strip toolResult content — frontend only needs status for ToolCard display.
-        # Agent reads from Amazon Bedrock AgentCore Memory directly, not via this API.
-        # This prevents Lambda 6MB response limit errors on long conversations.
-        for msg in messages:
-            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                for block in msg["content"]:
-                    if isinstance(block, dict) and "toolResult" in block:
-                        block["toolResult"]["content"] = []
+        # Keep the response under Lambda's 6MB limit (see chat_history.py):
+        # toolResult bodies and giant toolUse inputs are UI-irrelevant; the
+        # agent reads AgentCore Memory directly, not via this API.
+        strip_tool_result_content(messages)
+        truncate_tool_inputs(messages)
+        messages, truncated = cap_messages_size(messages)
+        if truncated:
+            logger.warning(
+                "Chat history for session %s exceeded size budget — oldest messages dropped",
+                session_id,
+            )
+            return {"messages": messages, "truncated": True}
     except Exception as e:
         logger.warning("Failed to read chat history from AgentCore Memory: %s", e)
 
@@ -1346,205 +1390,93 @@ def _cf_signed_url(s3_key: str, expires_in: int = 900) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Upload endpoints
+# Attachment raw-upload endpoint
 # ---------------------------------------------------------------------------
 
 ALLOWED_CONTENT_TYPES = {
-    "text/plain", "text/markdown", "application/json", "application/pdf",
+    "text/plain", "text/markdown", "text/csv", "text/html", "application/json",
+    "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml",
 }
+# Per-user raw attachment caps. These are safety valves against runaway
+# automation and leaked-token cost exposure — not usage discipline for
+# legitimate users. Defaults are deliberately generous for an internal /
+# team deployment (PPTX sources can be ~100MB each); override via Lambda
+# environment variables if your deployment needs tighter or looser bounds.
+CLOUD_RAW_MAX_OBJECTS = int(os.environ.get("ATTACHMENT_MAX_OBJECTS", "1000"))
+CLOUD_RAW_MAX_BYTES = int(os.environ.get("ATTACHMENT_MAX_BYTES", str(50 * 1024 * 1024 * 1024)))
 
 
-@app.post("/uploads/presign")
-def presign_upload() -> Dict[str, Any]:
-    """Generate a presigned PUT URL for file upload."""
-    user_id = get_user_id(app.current_event)
-    body = app.current_event.json_body
-
-    file_name: str = body.get("fileName", "")
-    content_type: str = body.get("contentType", "")
-    file_size: int = int(body.get("fileSize", 0))
-
-    if not file_name or not content_type:
-        return {"error": "fileName and contentType are required"}, 400
-    if content_type not in ALLOWED_CONTENT_TYPES:
-        return {"error": f"Unsupported file type: {content_type}"}, 400
-    if file_size > MAX_FILE_SIZE:
-        return {"error": "File too large"}, 400
-
-    upload_id = str(uuid.uuid4())[:8]
-    s3_key = f"uploads/tmp/{user_id}/{upload_id}/{file_name}"
-
-    url = s3_client.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": BUCKET_NAME, "Key": s3_key, "ContentType": content_type},
-        ExpiresIn=PRESIGNED_URL_EXPIRY,
-    )
-
-    table.put_item(Item={
-        "PK": deck_pk(user_id), "SK": upload_sk(upload_id),
-        "fileName": file_name, "fileType": content_type, "fileSize": file_size,
-        "s3KeyRaw": s3_key, "status": "uploading", "createdAt": now_iso(),
-    })
-    return {"uploadId": upload_id, "presignedUrl": url, "s3Key": s3_key}
+def _raw_attachment_usage(user_id: str) -> tuple[int, int]:
+    """Return current raw-object count and bytes for one user."""
+    count = 0
+    total_bytes = 0
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=f"uploads/{user_id}/"):
+        objects = page.get("Contents", [])
+        count += len(objects)
+        total_bytes += sum(int(obj.get("Size", 0)) for obj in objects)
+        if count >= CLOUD_RAW_MAX_OBJECTS or total_bytes >= CLOUD_RAW_MAX_BYTES:
+            break
+    return count, total_bytes
 
 
-# Text-extractable MIME types (can be read directly from S3 in Lambda)
-_TEXT_EXTRACTABLE = {"text/plain", "text/markdown", "application/json"}
+def _sanitize_attachment_filename(name: str) -> str:
+    """Return a single safe UTF-8 filename for an attachment source key."""
+    name = name.replace("/", "_").replace("\\", "_").replace("..", "_")
+    name = "".join(c for c in name if ord(c) >= 0x20 and ord(c) != 0x7F).lstrip(".")
+    encoded = name.encode("utf-8")[:255]
+    name = encoded.decode("utf-8", errors="ignore")
+    if not name or name.startswith("[Attached:"):
+        raise ValueError("Invalid fileName")
+    return name
 
 
-def _extract_pptx_text(s3_key: str) -> str:
-    """Extract slide text from PPTX using zipfile + XML (no python-pptx needed)."""
-    import io
-    import re
-    import zipfile
-    obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-    data = obj["Body"].read()
-    slides_text = []
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        slide_names = sorted(n for n in zf.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n))
-        for name in slide_names:
-            xml = zf.read(name).decode("utf-8")
-            texts = re.findall(r"<a:t>([^<]+)</a:t>", xml)
-            if texts:
-                slide_num = re.search(r"slide(\d+)", name).group(1)
-                slides_text.append(f"--- Slide {slide_num} ---\n" + "\n".join(texts))
-    return "\n\n".join(slides_text)
-
-
-@app.post("/uploads/<upload_id>/process")
-def process_upload(upload_id: str) -> Dict[str, Any]:
-    """Process an uploaded file — convert binary files at upload time."""
-    import tempfile
-    from pathlib import Path as _Path
-    from shared.ingest import IMAGE_EXTS, convert_file
-
+@app.post("/attachments/presign")
+def presign_attachment() -> Dict[str, Any]:
+    """Presign one immutable raw attachment PUT; no processing state is created."""
     user_id = get_user_id(app.current_event)
     body = app.current_event.json_body or {}
-    session_id: str = body.get("sessionId", "")
 
-    resp = table.get_item(Key={"PK": deck_pk(user_id), "SK": upload_sk(upload_id)})
-    item = resp.get("Item")
-    if not item:
-        raise app.not_found()
+    try:
+        file_name = _sanitize_attachment_filename(str(body.get("fileName", "")))
+        file_size = int(body.get("fileSize", 0))
+    except (TypeError, ValueError):
+        return {"error": "Valid fileName and fileSize are required"}, 400
 
-    file_type = item.get("fileType", "")
-    file_name = item.get("fileName", "unknown")
-    s3_key = item.get("s3KeyRaw", "")
-    update_expr_parts = ["#st = :st", "sessionId = :sid"]
-    expr_values: Dict[str, Any] = {":sid": session_id}
-    expr_names = {"#st": "status"}
+    content_type = str(body.get("contentType", "")).split(";", 1)[0].strip().lower()
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        return {"error": f"Unsupported file type: {content_type or 'unknown'}"}, 400
+    if file_size < 0 or file_size > MAX_FILE_SIZE:
+        return {"error": f"fileSize must be between 0 and {MAX_FILE_SIZE} bytes"}, 400
 
-    extracted_text = None
-    ext = _Path(file_name).suffix.lower()
+    object_count, stored_bytes = _raw_attachment_usage(user_id)
+    if object_count >= CLOUD_RAW_MAX_OBJECTS or stored_bytes + file_size > CLOUD_RAW_MAX_BYTES:
+        return {"error": "Raw attachment quota exceeded"}, 429
 
-    # --- Text files: read directly from S3 ---
-    if file_type in _TEXT_EXTRACTABLE and s3_key:
-        try:
-            obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-            extracted_text = obj["Body"].read().decode("utf-8")
-            update_expr_parts.append("extractedText = :et")
-            expr_values[":et"] = extracted_text[:50000]
-            expr_values[":st"] = "completed"
-        except Exception:
-            expr_values[":st"] = "completed"
-
-    # --- Images: no conversion needed ---
-    elif ext in IMAGE_EXTS:
-        expr_values[":st"] = "completed"
-
-    # --- Binary files (PDF/DOCX/XLSX/PPTX): download → convert → upload ---
-    elif ext in (".pdf", ".docx", ".xlsx") and s3_key:
-        converted_prefix = f"uploads/{user_id}/{upload_id}/converted"
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_path = _Path(tmp)
-                local_file = tmp_path / file_name
-                output_dir = tmp_path / "converted"
-
-                obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-                local_file.write_bytes(obj["Body"].read())
-
-                result = convert_file(local_file, output_dir)
-
-                if result.status == "error":
-                    expr_values[":st"] = "error"
-                    update_expr_parts.append("conversionError = :ce")
-                    expr_values[":ce"] = result.error or "Unknown error"
-                else:
-                    if output_dir.exists():
-                        for f in output_dir.rglob("*"):
-                            if f.is_file():
-                                rel = f.relative_to(output_dir)
-                                s3_dest = f"{converted_prefix}/{rel}"
-                                ct = "application/octet-stream"
-                                if f.suffix in (".md", ".txt"):
-                                    ct = "text/markdown"
-                                elif f.suffix == ".json":
-                                    ct = "application/json"
-                                elif f.suffix in (".png", ".jpg", ".jpeg"):
-                                    ct = f"image/{f.suffix.lstrip('.')}"
-                                s3_client.put_object(
-                                    Bucket=BUCKET_NAME, Key=s3_dest,
-                                    Body=f.read_bytes(), ContentType=ct,
-                                )
-
-                    expr_values[":st"] = "converted"
-                    if result.warnings:
-                        update_expr_parts.append("conversionWarnings = :cw")
-                        expr_values[":cw"] = result.warnings
-
-        except Exception as e:
-            logger.exception("Conversion failed for %s", upload_id)
-            expr_values[":st"] = "error"
-            update_expr_parts.append("conversionError = :ce")
-            expr_values[":ce"] = str(e)[:500]
-
-    else:
-        expr_values[":st"] = "completed"
-
-    table.update_item(
-        Key={"PK": deck_pk(user_id), "SK": upload_sk(upload_id)},
-        UpdateExpression="SET " + ", ".join(update_expr_parts),
-        ExpressionAttributeValues=expr_values,
-        ExpressionAttributeNames=expr_names,
+    source = f"uploads/{user_id}/{uuid.uuid4()}/{file_name}"
+    presigned_url = s3_client.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": BUCKET_NAME,
+            "Key": source,
+            "ContentType": content_type,
+            "IfNoneMatch": "*",
+            "Tagging": "sdpm-class=attachment-source",
+        },
+        ExpiresIn=PRESIGNED_URL_EXPIRY,
     )
-
-    image_url = None
-    if file_type.startswith("image/") and s3_key:
-        image_url = presigned_url(s3_client, BUCKET_NAME, s3_key)
-
     return {
-        "uploadId": upload_id,
-        "status": expr_values[":st"],
-        "extractedText": extracted_text,
-        "imageUrl": image_url,
-    }
-
-
-@app.get("/uploads/<upload_id>/status")
-def get_upload_status(upload_id: str) -> Dict[str, Any]:
-    """Return current processing status of an upload."""
-    user_id = get_user_id(app.current_event)
-    resp = table.get_item(Key={"PK": deck_pk(user_id), "SK": upload_sk(upload_id)})
-    item = resp.get("Item")
-    if not item:
-        raise app.not_found()
-
-    image_url = None
-    if item.get("fileType", "").startswith("image/") and item.get("s3KeyRaw"):
-        image_url = presigned_url(s3_client, BUCKET_NAME, item["s3KeyRaw"])
-
-    return {
-        "uploadId": upload_id,
-        "fileName": item.get("fileName", ""),
-        "fileType": item.get("fileType", ""),
-        "status": item.get("status", "unknown"),
-        "extractedText": item.get("extractedText"),
-        "imageUrl": image_url,
+        "source": source,
+        "presignedUrl": presigned_url,
+        "requiredHeaders": {
+            "Content-Type": content_type,
+            "If-None-Match": "*",
+            "x-amz-tagging": "sdpm-class=attachment-source",
+        },
     }
 
 

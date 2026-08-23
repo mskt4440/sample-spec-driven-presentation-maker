@@ -9,7 +9,12 @@ import { usePreferences } from "@/hooks/usePreferences"
 import { getAllowedModels, getDefaultChatModelId, getDefaultCreateModelId } from "@/lib/allowedModels"
 import { IS_LOCAL } from "@/lib/mode"
 import { toast } from "sonner"
+import { notifyError } from "@/lib/errors"
+import { useLocale, type Locale } from "@/i18n/LocaleProvider"
+import { useTranslations } from "next-intl"
+import { useTheme } from "next-themes"
 import { useEffect, useMemo, useState, useCallback } from "react"
+import type { TextScale } from "@/hooks/usePreferences"
 
 interface SettingsProps {
   open: boolean
@@ -17,6 +22,8 @@ interface SettingsProps {
 }
 
 export function Settings({ open, onOpenChange }: SettingsProps) {
+  const t = useTranslations("settings")
+  const { locale, setLocale } = useLocale()
   const {
     sendWithEnter,
     setSendWithEnter,
@@ -24,7 +31,10 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
     setChatModelId,
     createModelId,
     setCreateModelId,
+    textScale,
+    setTextScale,
   } = usePreferences()
+  const { theme, setTheme } = useTheme()
   const allowed = useMemo(() => getAllowedModels(), [])
   const composable = useMemo(() => allowed.filter((m) => m.composable !== false), [allowed])
   const defaultChatId = useMemo(() => getDefaultChatModelId(), [])
@@ -42,12 +52,12 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
     fetch("/api/agent/definitions").then((r) => r.json()).then((d) => {
       setAgentDefs(d.agents || [])
       setAgentSelection(d.selection || {})
-    }).catch(() => {})
+    }).catch((err) => notifyError("Failed to load agent definitions", err))
     fetch("/api/agent/models").then((r) => r.json()).then((d) => {
       setLocalModels((d.available || []).map((m: { modelId: string; name: string; description?: string }) => ({
         modelId: m.modelId, displayName: m.name, description: m.description,
       })))
-    }).catch(() => {})
+    }).catch((err) => notifyError("Failed to load model list", err))
   }, [open])
 
   const onAgentChange = useCallback((role: keyof AgentSelection, fileName: string) => {
@@ -120,7 +130,7 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="w-[400px] sm:w-[460px] p-0 flex flex-col">
         <SheetHeader className="px-5 pt-5 pb-3 shrink-0">
-          <SheetTitle className="text-lg">Settings</SheetTitle>
+          <SheetTitle className="text-lg">{t("title")}</SheetTitle>
         </SheetHeader>
 
         <div className="flex flex-col gap-4 px-5 pb-6 overflow-y-auto flex-1 min-h-0">
@@ -128,7 +138,7 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
           {IS_LOCAL && agentDefs.length > 0 && (
             <section
               aria-labelledby="agent-heading"
-              className="rounded-xl border border-white/[0.06] bg-card/40 p-4"
+              className="rounded-xl border border-border bg-card/40 p-4"
             >
               <div className="mb-3">
                 <h3
@@ -192,7 +202,7 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
           {allowed.length > 0 && (
             <section
               aria-labelledby="model-heading"
-              className="rounded-xl border border-white/[0.06] bg-card/40 p-4"
+              className="rounded-xl border border-border bg-card/40 p-4"
             >
               <div className="mb-3">
                 <h3
@@ -223,7 +233,7 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
                     triggerId="chat-model"
                     ariaLabel="Select chat model"
                   />
-                  <p className="mt-1 text-[11px] text-muted-foreground/80">
+                  <p className="mt-1 text-xs text-muted-foreground/80">
                     Conversations and planning.
                   </p>
                 </div>
@@ -244,7 +254,7 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
                     triggerId="create-model"
                     ariaLabel="Select create model"
                   />
-                  <p className="mt-1 text-[11px] text-muted-foreground/80">
+                  <p className="mt-1 text-xs text-muted-foreground/80">
                     Slides, styles, and other artifacts. Needs a capable model.
                   </p>
                 </div>
@@ -252,10 +262,120 @@ export function Settings({ open, onOpenChange }: SettingsProps) {
             </section>
           )}
 
+          {/* ── Appearance ── */}
+          <section
+            aria-labelledby="appearance-heading"
+            className="rounded-xl border border-border bg-card/40 p-4"
+          >
+            <div className="mb-4">
+              <h3
+                id="appearance-heading"
+                className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                {t("appearance")}
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("appearanceDescription")}
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <p id="theme-label" className="mb-2 text-sm font-medium text-foreground">
+                  {t("theme")}
+                </p>
+                <div role="radiogroup" aria-labelledby="theme-label" className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
+                  {(["light", "dark", "system"] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={theme === value}
+                      onClick={() => setTheme(value)}
+                      className={`min-h-11 rounded-md px-2 text-xs font-semibold transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        theme === value
+                          ? "bg-background-raised text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {t(value === "light" ? "themeLight" : value === "dark" ? "themeDark" : "themeSystem")}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-2">
+                  <p id="text-scale-label" className="text-sm font-medium text-foreground">
+                    {t("textSize")}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {t("textSizeDescription")}
+                  </p>
+                </div>
+                <div role="radiogroup" aria-labelledby="text-scale-label" className="grid grid-cols-4 gap-1 rounded-lg bg-muted p-1">
+                  {([90, 100, 110, 125] as TextScale[]).map((scale) => (
+                    <button
+                      key={scale}
+                      type="button"
+                      role="radio"
+                      aria-label={t("textScaleLabel", { scale })}
+                      aria-checked={textScale === scale}
+                      onClick={() => setTextScale(scale)}
+                      className={`min-h-11 rounded-md px-1 text-xs font-semibold transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        textScale === scale
+                          ? "bg-background-raised text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {scale}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* ── Language ── */}
+          <section
+            aria-labelledby="language-heading"
+            className="rounded-xl border border-border bg-card/40 p-4"
+          >
+            <div className="mb-3">
+              <h3
+                id="language-heading"
+                className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                {t("language")}
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("languageDescription")}
+              </p>
+            </div>
+            <div role="radiogroup" aria-labelledby="language-heading" className="flex gap-2">
+              {([["en", "English"], ["ja", "日本語"]] as [Locale, string][]).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={locale === value}
+                  onClick={() => setLocale(value)}
+                  className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                    locale === value
+                      ? "border-primary/50 bg-primary/10 text-foreground"
+                      : "border-border bg-card/40 text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </section>
+
           {/* ── Chat ── */}
           <section
             aria-labelledby="chat-heading"
-            className="rounded-xl border border-white/[0.06] bg-card/40 p-4"
+            className="rounded-xl border border-border bg-card/40 p-4"
           >
             <h3
               id="chat-heading"

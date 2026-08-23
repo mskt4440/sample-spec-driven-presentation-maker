@@ -12,14 +12,16 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { SlidePreview } from "@/services/deckService"
 import type { SpecFiles } from "@/services/deckService"
-import { Download, Layers, Loader2, LayoutGrid, Rows3, FolderOpen } from "lucide-react"
-import { useAuth } from "@/hooks/useAuth"
+import { Download, Layers, LayoutGrid, Rows3, FolderOpen } from "lucide-react"
 import { usePreferences } from "@/hooks/usePreferences"
 import { SpecStepNav, SpecMarkdownPreview } from "@/components/deck/SpecStepNav"
 import type { SpecTab } from "@/components/deck/SpecStepNav"
 import { SlideThumbnail } from "@/components/deck/SlideThumbnail"
 import { AnimatedSlidePreview } from "@/components/deck/AnimatedSlidePreview"
-import { CloudOnly, LocalOnly, IS_LOCAL } from "@/lib/mode"
+import { IS_LOCAL } from "@/lib/mode"
+import { notifyError } from "@/lib/errors"
+import { useTranslations } from "next-intl"
+import { AGENT_WAIT_COLORS } from "@/components/deck/SpecWaiting"
 
 
 interface SlideCarouselProps {
@@ -44,18 +46,20 @@ interface SlideCarouselProps {
   workflowPhase?: string | null
   /** Callback when user selects a style inline. */
   onStyleSelect?: (name: string) => void
+  /** Callback when user selects a template inline (isChange = template already confirmed). */
+  onTemplateSelect?: (name: string, isChange: boolean) => void
+  /** Confirmed template from deck.json (raw value, e.g. "corporate.pptx"). */
+  currentTemplate?: string | null
   /** Cognito ID token for style API calls. */
   idToken?: string
 }
 
-export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLoading, onSlideClick, scrollToSlide, onScrollComplete, headerActions, ownerAlias, specs, workflowPhase, onStyleSelect, idToken }: SlideCarouselProps) {
+export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLoading, onSlideClick, scrollToSlide, onScrollComplete, headerActions, ownerAlias, specs, workflowPhase, onStyleSelect, onTemplateSelect, currentTemplate, idToken }: SlideCarouselProps) {
+  const t = useTranslations("carousel")
   const slidesWithPreview = slides.filter((s) => s.previewUrl || s.composeUrl)
-  // eslint-disable-next-line no-console
   const slugs = slides.map(s => s.slug)
-  // eslint-disable-next-line no-console
   if (new Set(slugs).size !== slugs.length) console.warn("[SlideCarousel] duplicate slugs:", slugs)
   // Check compose URL duplicates across different slugs
-  // eslint-disable-next-line no-console
   const urlBySlug: Record<string,string> = {}
   const dupUrls: string[] = []
   for (const s of slidesWithPreview) {
@@ -63,16 +67,24 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     if (u && Object.values(urlBySlug).includes(u)) dupUrls.push(`${s.slug}→${u}`)
     if (u) urlBySlug[s.slug] = u
   }
-  // eslint-disable-next-line no-console
   if (dupUrls.length) console.warn("[SlideCarousel] same composeUrl used for multiple slides:", dupUrls, urlBySlug)
-  const auth = useAuth()
   const { viewMode, setViewMode } = usePreferences()
   const containerRef = useRef<HTMLDivElement>(null)
+
+  /* ── Aspect ratio reported by the first child (deck is uniform) ── */
+  const [deckAr, setDeckAr] = useState(16 / 9)
+  const arReported = useRef(false)
+  const handleAspectRatio = useCallback((ratio: number) => {
+    if (!arReported.current && ratio > 0) {
+      arReported.current = true
+      setDeckAr(ratio)
+    }
+  }, [])
 
   /* ── Compose update detection → auto-scroll to changed slide ── */
   const prevComposeKeys = useRef<Map<string, string>>(new Map())
   const scrollTargetRef = useRef<string | null | undefined>(undefined)
-  const [hadSlidesOnMount] = useState(slides.length > 0)
+  const hadSlidesOnMount = useRef(slides.length > 0)
   const [firstComposeSeen, setFirstComposeSeen] = useState(false)
   const [knownComposeUrls, setKnownComposeUrls] = useState<Map<string, string>>(new Map())
 
@@ -87,7 +99,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     }
     // Mark first compose seen (skip animation for existing decks)
     if (!firstComposeSeen && slides.some(s => s.composeUrl)) {
-      if (hadSlidesOnMount) {
+      if (hadSlidesOnMount.current) {
         // Existing deck: suppress animation for this first batch
         anyChanged = false
       }
@@ -95,6 +107,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     }
     if (anyChanged) scrollTargetRef.current = null // arm scroll for next onAnimate
     setKnownComposeUrls(new Map(prevComposeKeys.current))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slides])
 
   const handleAnimate = useCallback((slug: string) => {
@@ -135,13 +148,6 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
   /* ── Spec tab state + auto-focus ── */
   const [specTab, setSpecTab] = useState<SpecTab>("brief")
   const prevSpecsRef = useRef<SpecFiles | null | undefined>(null)
-  // Suppress animation for 3s after slides tab becomes visible
-  const [settled, setSettled] = useState(false)
-  useEffect(() => {
-    if (specTab !== "slides") { setSettled(false); return }
-    const t = setTimeout(() => setSettled(true), 3000)
-    return () => clearTimeout(t)
-  }, [specTab])
 
   /**
    * Auto-focus: when a spec file transitions from null to non-null,
@@ -193,13 +199,13 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
   /** Local: open deck directory in Finder/Explorer */
   async function handleFolderOpen() {
     if (!deckId || !IS_LOCAL) return
-    fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deckId }) }).catch(() => {})
+    fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deckId }) }).catch((err) => notifyError(t("errorOpenFolder"), err, { retry: handleFolderOpen }))
   }
 
   /** Local: open output.pptx with default app */
   async function handlePptxOpen() {
     if (!deckId || !IS_LOCAL) return
-    fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deckId, file: "output.pptx" }) }).catch(() => {})
+    fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deckId, file: "output.pptx" }) }).catch((err) => notifyError(t("errorOpenPptx"), err, { retry: handlePptxOpen }))
   }
 
   /**
@@ -207,10 +213,8 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
    *
    * @returns JSX element for the empty slides state
    */
-  const WAIT_COLORS = [
-    "oklch(0.75 0.14 185)", "oklch(0.82 0.16 75)",
-    "oklch(0.70 0.18 330)", "oklch(0.78 0.15 145)",
-  ]
+  // Use the shared five agent identity colors for waiting animations.
+  const WAIT_COLORS = AGENT_WAIT_COLORS.map((c) => c.css)
 
   function renderSlidesEmpty(): React.ReactNode {
     if (isLoading) {
@@ -235,7 +239,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                   <div
                     className="build-shimmer-el absolute inset-0"
                     style={{
-                      background: `linear-gradient(90deg, transparent, ${WAIT_COLORS[i]}40, transparent)`,
+                      background: `linear-gradient(90deg, transparent, color-mix(in oklch, ${WAIT_COLORS[i]} 25%, transparent), transparent)`,
                       opacity: 0.35,
                       animation: `build-shimmer 2.8s ease-in-out ${i * 0.3}s infinite`,
                     }}
@@ -244,10 +248,10 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
               ))}
             </div>
             <div>
-              <p className="text-sm font-medium text-foreground">Building your slides</p>
-              <p className="text-xs text-foreground-secondary mt-1">This usually takes a few seconds…</p>
+              <p className="text-sm font-medium text-foreground">{t("buildingSlides")}</p>
+              <p className="text-xs text-foreground-secondary mt-1">{t("buildingHint")}</p>
             </div>
-            <div className="w-48 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+            <div className="w-48 h-1.5 rounded-full bg-foreground/[0.06] overflow-hidden">
               <div
                 className="h-full rounded-full"
                 style={{
@@ -278,7 +282,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                       "--fan-r": `${(i - 1.5) * 8}deg`,
                       border: `1.5px solid ${color}`,
                       background: `oklch(0.14 0.01 260 / ${0.8 - i * 0.1})`,
-                      boxShadow: `0 0 12px ${color}30`,
+                      boxShadow: `0 0 12px color-mix(in oklch, ${color} 19%, transparent)`,
                       animation: `compose-fan 2.4s ease-in-out ${i * 0.15}s infinite`,
                     } as React.CSSProperties}
                   >
@@ -301,14 +305,14 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                 )
               })}
             </div>
-            <p className="text-sm text-muted-foreground">Composing slides…</p>
+            <p className="text-sm text-muted-foreground">{t("composing")}</p>
           </div>
         ) : (
           <>
             <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4 text-muted-foreground/40">
               <Layers className="h-7 w-7" />
             </div>
-            <p className="text-sm text-muted-foreground">Slide previews will appear here after generating a PPTX.</p>
+            <p className="text-sm text-muted-foreground">{t("previewsPlaceholder")}</p>
           </>
         )}
       </div>
@@ -324,14 +328,14 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     if (slidesWithPreview.length === 0) return renderSlidesEmpty()
 
     return (
-      <div ref={containerRef} className={`flex-1 overflow-y-auto px-6 py-6 ${viewMode === "grid" ? "" : "space-y-4"}`}>
+      <div ref={containerRef} className="flex-1 overflow-y-auto px-6 py-6">
         {viewMode === "grid" ? (
           <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
             {slidesWithPreview.map((slide, i) => (
               <SlideThumbnail
                 key={slide.slug}
                 src={slide.previewUrl}
-                alt={`Slide ${i + 1} of ${slidesWithPreview.length}${deckName ? `: ${deckName}` : ""}`}
+                alt={t("slideAltFull", { number: i + 1, total: slidesWithPreview.length }) + (deckName ? `: ${deckName}` : "")}
                 index={i}
                 slug={slide.slug}
                 onClick={() => onSlideClick?.(i + 1)}
@@ -346,23 +350,29 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
             ))}
           </div>
         ) : (
-          slidesWithPreview.map((slide, i) => (
+          /* Full view: cap height so one slide always fits the viewport
+             (100vh minus header + paddings). Width follows aspect ratio. */
+          <div className="mx-auto w-full space-y-4"
+               style={{ maxWidth: `calc((100vh - 170px) * ${deckAr})` }}>
+          {slidesWithPreview.map((slide, i) => (
             slide.composeUrl && defsUrl ? (
               <AnimatedSlidePreview
                 key={slide.slug}
                 defsUrl={defsUrl}
                 composeUrl={slide.composeUrl}
                 slug={slide.slug}
-                skipAnimation={!settled}
-                knownUrl={knownComposeUrls.get(slide.slug) || null}
+                skipAnimation={hadSlidesOnMount.current && !firstComposeSeen}
+                knownUrl={hadSlidesOnMount.current ? (knownComposeUrls.get(slide.slug) || null) : null}
                 onAnimate={() => handleAnimate(slide.slug)}
+                onAspectRatio={handleAspectRatio}
                 fallback={
                   <SlideThumbnail
                     src={slide.previewUrl}
-                    alt={`Slide ${i + 1}`}
+                    alt={t("slideAlt", { number: i + 1 })}
                     index={i}
                     slug={slide.slug}
                     onClick={() => onSlideClick?.(i + 1)}
+                    onAspectRatio={handleAspectRatio}
                     className="slide-shadow w-full cursor-pointer hover:ring-2 hover:ring-primary/50 transition-shadow"
                   />
                 }
@@ -371,15 +381,17 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
               <SlideThumbnail
                 key={slide.slug}
                 src={slide.previewUrl}
-                alt={`Slide ${i + 1} of ${slidesWithPreview.length}${deckName ? `: ${deckName}` : ""}`}
+                alt={t("slideAltFull", { number: i + 1, total: slidesWithPreview.length }) + (deckName ? `: ${deckName}` : "")}
                 index={i}
                 slug={slide.slug}
                 onClick={() => onSlideClick?.(i + 1)}
                 updated={updatedIds.has(slide.slug)}
+                onAspectRatio={handleAspectRatio}
                 className="slide-shadow w-full cursor-pointer hover:ring-2 hover:ring-primary/50 transition-shadow"
               />
             )
-          ))
+          ))}
+          </div>
         )}
       </div>
     )
@@ -401,7 +413,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
           <div className="flex items-center gap-3">
             <div>
               <h2 className="text-sm font-medium truncate max-w-[200px]">
-                {deckName || "Preview"}
+                {deckName || t("preview")}
               </h2>
               <p className="text-xs text-muted-foreground">
                 {slidesWithPreview.length} {slidesWithPreview.length === 1 ? "slide" : "slides"}
@@ -416,14 +428,14 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
               <button
                 onClick={() => setViewMode("full")}
                 className={`p-1.5 rounded-md transition-colors ${viewMode === "full" ? "bg-background-hover text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                aria-label="Full size view"
+                aria-label={t("fullSizeView")}
               >
                 <Rows3 className="h-3.5 w-3.5" />
               </button>
               <button
                 onClick={() => setViewMode("grid")}
                 className={`p-1.5 rounded-md transition-colors ${viewMode === "grid" ? "bg-background-hover text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                aria-label="Grid view"
+                aria-label={t("gridView")}
               >
                 <LayoutGrid className="h-3.5 w-3.5" />
               </button>
@@ -432,7 +444,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
               <button
                 onClick={handleFolderOpen}
                 className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-md hover:bg-accent transition-colors"
-                aria-label="Open folder"
+                aria-label={t("openFolder")}
               >
                 <FolderOpen className="h-3.5 w-3.5" />
                 Folder
@@ -443,7 +455,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                 <button
                   onClick={handlePptxOpen}
                   className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-md hover:bg-accent transition-colors"
-                  aria-label="Open PPTX"
+                  aria-label={t("openPptx")}
                 >
                   <FolderOpen className="h-3.5 w-3.5" />
                   PPTX
@@ -453,7 +465,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                   href={pptxUrl}
                   download
                   className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground no-underline px-3 py-1.5 rounded-md hover:bg-accent transition-colors"
-                  aria-label="Download PPTX"
+                  aria-label={t("downloadPptx")}
                 >
                   <Download className="h-3.5 w-3.5" />
                   PPTX
@@ -473,7 +485,10 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
           specName={specTab.charAt(0).toUpperCase() + specTab.slice(1)}
           specKey={specTab}
           onStyleSelect={specTab === "artDirection" ? onStyleSelect : undefined}
+          onTemplateSelect={specTab === "artDirection" ? onTemplateSelect : undefined}
+          currentTemplate={specTab === "artDirection" ? currentTemplate : undefined}
           idToken={specTab === "artDirection" ? idToken : undefined}
+          outlineExists={specTab === "brief" ? (specs?.outline != null) : undefined}
         />
       )}
     </div>

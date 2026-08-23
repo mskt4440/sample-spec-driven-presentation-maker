@@ -11,17 +11,21 @@
 
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
+import { useTranslations } from "next-intl"
 import { useAuth } from "@/hooks/useAuth"
 import { useStyleWorkspace } from "@/hooks/useStyleWorkspace"
 import { AppShell } from "@/components/AppShell"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
 import { fetchStyles, fetchStyleHtml, pinStyle, saveUserStyle, deleteUserStyle, renameUserStyle, type StyleEntry } from "@/services/deckService"
 import { StyleSlidePreview } from "@/components/StyleSlidePreview"
+import { buildCoverDoc } from "@/components/StyleSlidePreview"
 import { StyleChatShell } from "@/components/chat/StyleChatShell"
 import { Star, Trash2, Palette, Download, Sparkles, Copy, MessageSquare, Pencil, MoreHorizontal } from "lucide-react"
 
 export default function StylesPage() {
+  const t = useTranslations("stylesPage")
+  const tCommon = useTranslations("common")
   const auth = useAuth()
   const idToken = auth.user?.id_token
   const ws = useStyleWorkspace(idToken)
@@ -45,8 +49,10 @@ export default function StylesPage() {
     if (!idToken) return
     const s = await fetchStyles(idToken)
     setStyles(s)
+    ws.setStyles(s)
     setLoading(false)
-  }, [idToken])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idToken, ws.setStyles])
 
   useEffect(() => { refreshStyles() }, [refreshStyles])
 
@@ -80,7 +86,7 @@ export default function StylesPage() {
     const result = await saveUserStyle(name, html, idToken)
     if (result.error) { showToast(result.error, "error"); return }
     await refreshStyles()
-    showToast(`Imported "${name}"`)
+    showToast(t("imported", { name }))
   }
 
   const handleDelete = async (name: string) => {
@@ -90,7 +96,7 @@ export default function StylesPage() {
     setStyles(prev => prev.filter(s => s.name !== name))
     if (ws.styleName === name) ws.navigateToList()
     setDeleteConfirm(null)
-    showToast(`Deleted "${name}"`)
+    showToast(t("deleted", { name }))
   }
 
   const handleExport = async (name: string) => {
@@ -119,7 +125,7 @@ export default function StylesPage() {
     const result = await saveUserStyle(filename, newHtml, idToken)
     if (result.error) { showToast(result.error, "error"); return }
     await refreshStyles()
-    showToast(`Copied as "Copy of ${originalTitle}"`)
+    showToast(t("copiedAs", { name: `Copy of ${originalTitle}` }))
   }
 
   const handleCreateStyle = async () => {
@@ -139,8 +145,8 @@ export default function StylesPage() {
     if (!idToken || !inlineRename) return
     const newName = inlineRenameValue.trim()
     if (!newName || newName === inlineRename) { setInlineRename(null); setInlineRenameError(""); return }
-    if (!/^[a-zA-Z0-9_-]+$/.test(newName)) { setInlineRenameError("Letters, numbers, hyphens, underscores only"); return }
-    if (styles.some(s => s.name === newName)) { setInlineRenameError("Name already exists"); return }
+    if (!/^[a-zA-Z0-9_-]+$/.test(newName)) { setInlineRenameError(t("renameCharsError")); return }
+    if (styles.some(s => s.name === newName)) { setInlineRenameError(t("nameExists")); return }
     const result = await renameUserStyle(inlineRename, newName, idToken)
     if (result.error) { setInlineRenameError(result.error); return }
     setInlineRename(null)
@@ -165,13 +171,13 @@ export default function StylesPage() {
           <div className="max-w-5xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
             <div className="flex items-center justify-between mb-8">
               <div>
-                <h1 className="text-xl font-semibold tracking-[-0.02em]">Styles</h1>
-                <p className="text-sm text-foreground-muted mt-1">Manage and preview presentation styles</p>
+                <h1 className="text-xl font-semibold tracking-[-0.02em]">{t("title")}</h1>
+                <p className="text-sm text-foreground-muted mt-1">{t("subtitle")}</p>
               </div>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {[...Array(8)].map((_, i) => (
-                <div key={i} className="aspect-[16/10] rounded-xl bg-white/[0.03] animate-pulse" />
+                <div key={i} className="aspect-[16/10] rounded-xl bg-foreground/[0.03] animate-pulse" />
               ))}
             </div>
           </div>
@@ -183,7 +189,7 @@ export default function StylesPage() {
                 onClick={ws.navigateToList}
                 className="text-sm text-foreground-muted hover:text-foreground transition-colors"
               >
-                ← Back
+                ← {t("back")}
               </button>
               <h2 className="text-sm font-semibold">{ws.styleName}</h2>
               <button
@@ -202,7 +208,7 @@ export default function StylesPage() {
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-brand-teal hover:text-brand-teal-bright border border-brand-teal/25 hover:border-brand-teal/40 bg-brand-teal/[0.06] hover:bg-brand-teal/[0.1] transition-colors"
                   >
                     <Sparkles className="h-3 w-3" />
-                    Edit with AI
+                    {t("editWithAI")}
                   </button>
                   <PreviewMoreMenu
                     onExport={() => handleExport(ws.styleName!)}
@@ -213,10 +219,10 @@ export default function StylesPage() {
               {currentStyle?.source === "builtin" && (
                 <button
                   onClick={() => handleCopyToMyStyles(ws.styleName!)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-foreground-muted hover:text-foreground border border-white/[0.08] hover:border-white/[0.15] transition-colors"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-foreground-muted hover:text-foreground border border-border hover:border-border-hover transition-colors"
                 >
                   <Copy className="h-3 w-3" />
-                  Copy to My Styles
+                  {t("copyToMyStyles")}
                 </button>
               )}
             </div>
@@ -227,13 +233,13 @@ export default function StylesPage() {
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <Sparkles className="h-12 w-12 text-brand-teal/20 mx-auto mb-4" />
-              <h2 className="text-sm font-semibold mb-1">Create with AI</h2>
-              <p className="text-xs text-foreground-muted mb-4">Creating your new style…</p>
+              <h2 className="text-sm font-semibold mb-1">{t("createWithAI")}</h2>
+              <p className="text-xs text-foreground-muted mb-4">{t("creatingStyle")}</p>
               <button
                 onClick={ws.navigateToList}
-                className="mt-4 px-3 py-1.5 text-xs rounded-lg border border-white/[0.08] hover:bg-white/[0.04] transition-colors"
+                className="mt-4 px-3 py-1.5 text-xs rounded-lg border border-border hover:bg-foreground/[0.04] transition-colors"
               >
-                ← Back to Styles
+                ← {t("backToStyles")}
               </button>
             </div>
           </div>
@@ -242,14 +248,14 @@ export default function StylesPage() {
           <div className="max-w-5xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
             <div className="flex items-center justify-between mb-8">
               <div>
-                <h1 className="text-xl font-semibold tracking-[-0.02em]">Styles</h1>
-                <p className="text-sm text-foreground-muted mt-1">Manage and preview presentation styles</p>
+                <h1 className="text-xl font-semibold tracking-[-0.02em]">{t("title")}</h1>
+                <p className="text-sm text-foreground-muted mt-1">{t("subtitle")}</p>
               </div>
             </div>
             <div className="flex flex-col gap-10">
               {/* User styles */}
               <section>
-                <h2 className="text-xs font-semibold text-foreground-muted uppercase tracking-wider mb-4">My Styles</h2>
+                <h2 className="text-xs font-semibold text-foreground-muted uppercase tracking-wider mb-4">{t("myStyles")}</h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
                   {userStyles.map(style => (
                     <StyleListCard
@@ -271,17 +277,17 @@ export default function StylesPage() {
                   {/* Create with AI card + Import link */}
                   <div className="flex flex-col">
                     <button
-                      className="aspect-[16/10] rounded-xl border-2 border-dashed border-white/[0.08] hover:border-brand-teal/30 bg-transparent hover:bg-brand-teal/[0.03] flex flex-col items-center justify-center gap-2 transition-all duration-200 cursor-pointer group"
+                      className="aspect-[16/10] rounded-xl border-2 border-dashed border-border hover:border-brand-teal/30 bg-transparent hover:bg-brand-teal/[0.03] flex flex-col items-center justify-center gap-2 transition-all duration-200 cursor-pointer group"
                       onClick={handleCreateStyle}
                     >
                       <Sparkles className="h-6 w-6 text-brand-teal/30 group-hover:text-brand-teal/60 transition-colors duration-200" />
-                      <span className="text-xs text-foreground/30 group-hover:text-foreground/60 font-medium transition-colors duration-200">Create with AI</span>
+                      <span className="text-xs text-foreground/30 group-hover:text-foreground/60 font-medium transition-colors duration-200">{t("createWithAI")}</span>
                     </button>
                     <button
                       className="mt-2 py-1.5 text-xs text-foreground/25 hover:text-foreground/50 transition-colors text-center"
                       onClick={() => fileInputRef.current?.click()}
                     >
-                      Import Style
+                      {t("importStyle")}
                     </button>
                   </div>
                   <input
@@ -300,7 +306,7 @@ export default function StylesPage() {
 
               {/* Built-in styles */}
               <section>
-                <h2 className="text-xs font-semibold text-foreground-muted uppercase tracking-wider mb-4">Built-in Styles</h2>
+                <h2 className="text-xs font-semibold text-foreground-muted uppercase tracking-wider mb-4">{t("builtinStyles")}</h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
                   {builtinStyles.map(style => (
                     <StyleListCard
@@ -326,7 +332,7 @@ export default function StylesPage() {
             styleName={ws.styleName!}
             onStyleWritten={() => ws.refreshPreview()}
             onStyleSaved={async (saved) => {
-              showToast(`Style saved: ${saved.title}`, "success")
+              showToast(t("styleSaved", { title: saved.title }), "success")
               await refreshStyles()
             }}
           />
@@ -337,9 +343,9 @@ export default function StylesPage() {
       <ConfirmDialog
         open={!!deleteConfirm}
         onOpenChange={(open) => { if (!open) setDeleteConfirm(null) }}
-        title="Delete style"
-        description={<>Are you sure you want to delete <span className="font-medium text-foreground">{deleteConfirm}</span>? This cannot be undone.</>}
-        confirmLabel="Delete"
+        title={t("deleteStyleTitle")}
+        description={<>{t.rich("deleteDescription", { name: () => <span className="font-medium text-foreground">{deleteConfirm}</span> })}</>}
+        confirmLabel={tCommon("delete")}
         variant="destructive"
         onConfirm={() => deleteConfirm && handleDelete(deleteConfirm)}
       />
@@ -371,6 +377,7 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
   onRenameSubmit?: () => void
   onRenameCancel?: () => void
 }) {
+  const t = useTranslations("stylesPage")
   const cardRef = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(0.15)
 
@@ -382,17 +389,19 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
     return () => ro.disconnect()
   }, [])
 
+  const coverDoc = useMemo(() => style.html ? buildCoverDoc(style.html) : "", [style.html])
+
   return (
     <div
       ref={cardRef}
-      className="group relative rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-all duration-200 cursor-pointer"
+      className="group relative rounded-xl overflow-hidden border border-border bg-foreground/[0.02] hover:border-border-hover transition-all duration-200 cursor-pointer"
       onClick={() => onPreview(style.name)}
     >
       {/* Cover preview */}
       <div className="relative overflow-hidden bg-black/20" style={{ height: 1080 * scale }}>
-        {style.coverHtml ? (
+        {coverDoc ? (
           <iframe
-            srcDoc={style.coverHtml}
+            srcDoc={coverDoc}
             className="pointer-events-none"
             style={{ width: 1920, height: 1080, transform: `scale(${scale})`, transformOrigin: "top left", border: "none" }}
             tabIndex={-1}
@@ -407,7 +416,7 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
       </div>
 
       {/* Info bar */}
-      <div className="px-3 py-2.5 border-t border-white/[0.06]">
+      <div className="px-3 py-2.5 border-t border-border">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium truncate flex-1 min-w-0">
             {isRenaming ? (
@@ -418,13 +427,13 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
                   onChange={e => onRenameChange?.(e.target.value)}
                   onBlur={onRenameSubmit}
                   onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); onRenameSubmit?.() } if (e.key === "Escape") onRenameCancel?.() }}
-                  className={`w-full text-sm font-medium bg-white/[0.06] rounded px-1.5 py-0.5 -ml-1.5 outline-none ring-1 transition-colors ${renameError ? "ring-red-400/60" : "ring-brand-teal/40 focus:ring-brand-teal/60"}`}
+                  className={`w-full text-sm font-medium bg-foreground/[0.06] rounded px-1.5 py-0.5 -ml-1.5 outline-none ring-1 transition-colors ${renameError ? "ring-red-400/60" : "ring-brand-teal/40 focus:ring-brand-teal/60"}`}
                 />
                 {renameError && <span className="text-[11px] text-red-400 mt-0.5">{renameError}</span>}
               </span>
             ) : (
               <span
-                className="group/name inline-flex items-center gap-1 cursor-text rounded px-1.5 py-0.5 -ml-1.5 hover:bg-white/[0.04] transition-colors"
+                className="group/name inline-flex items-center gap-1 cursor-text rounded px-1.5 py-0.5 -ml-1.5 hover:bg-foreground/[0.04] transition-colors"
                 onClick={e => { if (onRename) { e.stopPropagation(); onRename(style.name) } }}
               >
                 {style.name}
@@ -438,7 +447,7 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
               className={`p-1 rounded transition-colors ${
                 style.pinned ? "text-brand-teal" : "text-foreground-muted hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-150"
               }`}
-              aria-label={style.pinned ? `Unpin ${style.name}` : `Pin ${style.name}`}
+              aria-label={style.pinned ? t("unpinAria", { name: style.name }) : t("pinAria", { name: style.name })}
             >
               <Star className="h-3.5 w-3.5" fill={style.pinned ? "currentColor" : "none"} />
             </button>
@@ -446,7 +455,7 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
               <button
                 onClick={e => { e.stopPropagation(); onExport(style.name) }}
                 className="p-1 rounded text-foreground-muted hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-150"
-                aria-label={`Export ${style.name}`}
+                aria-label={t("exportAria", { name: style.name })}
               >
                 <Download className="h-3.5 w-3.5" />
               </button>
@@ -455,7 +464,7 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
               <button
                 onClick={e => { e.stopPropagation(); onDelete(style.name) }}
                 className="p-1 rounded text-foreground-muted hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
-                aria-label={`Delete ${style.name}`}
+                aria-label={t("deleteAria", { name: style.name })}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -463,7 +472,7 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
           </div>
         </div>
         {style.source === "user" && !isRenaming && (
-          <span className="text-[11px] text-brand-teal/70 font-medium mt-0.5 block">Custom</span>
+          <span className="text-[11px] text-brand-teal/70 font-medium mt-0.5 block">{t("custom")}</span>
         )}
       </div>
     </div>
@@ -472,31 +481,33 @@ function StyleListCard({ style, onPreview, onPin, onDelete, onExport, onRename, 
 
 /** ⋯ menu for preview header (Export / Delete). */
 function PreviewMoreMenu({ onExport, onDelete }: { onExport: () => void; onDelete: () => void }) {
+  const t = useTranslations("stylesPage")
+  const tCommon = useTranslations("common")
   const [open, setOpen] = useState(false)
   return (
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
         className="p-1 rounded text-foreground-muted hover:text-foreground transition-colors"
-        aria-label="More actions"
+        aria-label={t("moreActions")}
       >
         <MoreHorizontal className="h-4 w-4" />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] py-1 rounded-lg border border-white/[0.1] shadow-[0_8px_32px_oklch(0_0_0/50%)]" style={{ background: "oklch(0.14 0.005 260 / 98%)", backdropFilter: "blur(12px)" }}>
+          <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] py-1 rounded-lg border border-border-hover bg-popover shadow-[var(--shadow-lift)] backdrop-blur-xl">
             <button
               onClick={() => { setOpen(false); onExport() }}
-              className="w-full px-3 py-2 text-left text-sm text-foreground/70 hover:text-foreground hover:bg-white/[0.06] transition-colors flex items-center gap-2"
+              className="w-full px-3 py-2 text-left text-sm text-foreground/70 hover:text-foreground hover:bg-foreground/[0.06] transition-colors flex items-center gap-2"
             >
-              <Download className="h-3.5 w-3.5" /> Export
+              <Download className="h-3.5 w-3.5" /> {t("export")}
             </button>
             <button
               onClick={() => { setOpen(false); onDelete() }}
               className="w-full px-3 py-2 text-left text-sm text-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-2"
             >
-              <Trash2 className="h-3.5 w-3.5" /> Delete
+              <Trash2 className="h-3.5 w-3.5" /> {tCommon("delete")}
             </button>
           </div>
         </>

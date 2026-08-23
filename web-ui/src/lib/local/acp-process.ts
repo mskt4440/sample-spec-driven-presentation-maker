@@ -11,9 +11,10 @@ import { spawn, type ChildProcess } from "child_process"
 import path from "path"
 import { DECK_ROOT, resolveDeckDir } from "./deck-paths"
 import { getActiveAgent, type AgentConfig } from "./acp-adapter"
+import { syncToAgentsDir } from "./agents-sync"
 
 export { DECK_ROOT }
-const MCP_LOCAL_DIR = path.resolve(process.cwd(), "..", "mcp-local")
+const MCP_LOCAL_DIR = path.resolve(process.cwd(), "..", "servers", "local")
 const MAX_PROCESSES = 3
 
 type PendingResolve = (value: unknown) => void
@@ -50,13 +51,15 @@ function handleLine(ps: ProcessState, line: string) {
   let msg: Record<string, unknown>
   try { msg = JSON.parse(line) } catch { return }
 
-  // JSON-RPC response
+  // JSON-RPC response — resolve the pending promise, then fall through
+  // so the end_turn detection below can flip ps.running back to false.
+  // Returning here would short-circuit reuse: each turn would spawn a fresh
+  // process, dropping the prior turn's context (read_guides, upload result,
+  // hearing answers) and making the agent appear to drift back into Phase 1.
   if (msg.id != null && ps.pending.has(msg.id as number)) {
     const resolve = ps.pending.get(msg.id as number)!
     ps.pending.delete(msg.id as number)
     resolve(msg.result)
-    for (const fn of ps.listeners) fn(msg)
-    return
   }
 
   // Auto-approve permission requests
@@ -111,22 +114,13 @@ function rpcNotifyTo(ps: ProcessState, method: string, params: Record<string, un
 }
 
 /** Ensure agents/ has files (first launch before Settings is opened). */
-function ensureAgentsDir(): void {
-  const fs = require("fs") as typeof import("fs")
-  const agentsDir = path.join(MCP_LOCAL_DIR, ".kiro", "agents")
-  const acpDir = path.join(MCP_LOCAL_DIR, ".kiro", "acp-agents")
-  if (!fs.existsSync(acpDir)) return
-  // Skip if agents/ already has .json files
-  if (fs.existsSync(agentsDir) && fs.readdirSync(agentsDir).some((f: string) => f.endsWith(".json"))) return
-  // Copy defaults
-  fs.mkdirSync(agentsDir, { recursive: true })
-  for (const f of fs.readdirSync(acpDir).filter((f: string) => f.endsWith(".json"))) {
-    fs.copyFileSync(path.join(acpDir, f), path.join(agentsDir, f))
-  }
-}
-
 async function spawnProcess(agentName: string, existingSessionId?: string, adapter?: AgentConfig): Promise<ProcessState> {
-  ensureAgentsDir()
+  // Re-derive .kiro/agents/ from the acp-agents catalog + user selection on
+  // every spawn (idempotent, all-or-nothing) — a `git pull` that updates the
+  // catalog takes effect on the next spawn. If the derivation fails, the
+  // spawn fails: launching from silently stale agent files is the exact bug
+  // this re-derivation exists to prevent.
+  syncToAgentsDir()
   const cfg = adapter || getActiveAgent()
   let args = [...cfg.args]
   const flagIdx = args.indexOf("--agent")
