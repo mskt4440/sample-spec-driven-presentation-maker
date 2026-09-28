@@ -8,6 +8,7 @@ mcp-local and other consumers should call these instead of assembling low-level 
 
 import os
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +43,18 @@ def get_styles_dirs() -> list[Path]:
     return _get_resource_dirs("SDPM_STYLES_DIR", "styles", BUNDLED_STYLES_DIR)
 
 
+def _list_styles_tagged(styles_dirs: list[Path]) -> list[dict]:
+    """Merge styles across dirs and tag each with source ("user" | "builtin")."""
+    from sdpm.config import get_user_config_dir
+    from sdpm.knowledge.reference import list_styles_merged
+
+    user_dir = get_user_config_dir() / "styles"
+    raw = list_styles_merged(styles_dirs)
+    for s in raw:
+        s["source"] = "user" if (user_dir / f"{s['name']}.html").exists() else "builtin"
+    return raw
+
+
 def list_styles_filtered(
     styles_dirs: list[Path],
     pinned_names: list[str],
@@ -61,20 +74,25 @@ def list_styles_filtered(
     Returns:
         Filtered list with pinned/source metadata.
     """
-    from sdpm.config import get_user_config_dir
-    from sdpm.knowledge.reference import filter_styles, list_styles_merged
+    from sdpm.knowledge.reference import filter_styles
 
-    user_dir = get_user_config_dir() / "styles"
-    raw = list_styles_merged(styles_dirs)
+    return filter_styles(_list_styles_tagged(styles_dirs), pinned_names, include_all)
 
-    # Tag source based on whether the style file exists in user dir
-    for s in raw:
-        if (user_dir / f"{s['name']}.html").exists():
-            s["source"] = "user"
-        else:
-            s["source"] = "builtin"
 
-    return filter_styles(raw, pinned_names, include_all)
+def list_styles_listing(
+    styles_dirs: list[Path],
+    pinned_names: list[str],
+    include_all: bool = False,
+) -> dict:
+    """Build the ``list_styles`` tool payload from the filesystem.
+
+    Same as :func:`list_styles_filtered` but returns the full tool payload
+    (see :func:`sdpm.knowledge.reference.build_styles_listing`), including the
+    names of styles hidden by the pin filter.
+    """
+    from sdpm.knowledge.reference import build_styles_listing
+
+    return build_styles_listing(_list_styles_tagged(styles_dirs), pinned_names, include_all)
 
 
 def list_templates_with_metadata(
@@ -154,19 +172,140 @@ def analyze_and_store_template(template_path: Path, description: str = "") -> di
     }
 
 
-def apply_style(deck_dir: str | Path, style: str) -> dict[str, Any]:
-    """Apply a named style to a deck's art-direction.
+def merge_style_metadata(
+    html_text: str,
+    template_analysis: dict[str, Any] | None,
+    deck_json: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge style and template facts into deck metadata without mutating inputs.
 
-    Copies the style HTML to {deck_dir}/specs/art-direction.html.
+    The style's ``--color-text`` always becomes ``defaultTextColor`` and its
+    ``--color-bg`` becomes ``defaultBackground`` (the ground every slide gets unless
+    it sets its own ``background``); without ``--color-text`` the template theme's
+    text colour fills an empty ``defaultTextColor``. Template analysis fills only
+    empty font and slide-size fields.
+    """
+    import re
+
+    from sdpm.engine.schema import complete_deck_skeleton
+
+    merged = complete_deck_skeleton(deck_json)
+    sources: dict[str, str] = {}
+    merged["_sources"] = sources  # popped by style_field_sources()
+    root_match = re.search(r":root\s*\{(?P<body>.*?)\}", html_text, re.DOTALL | re.IGNORECASE)
+    if root_match:
+        color_match = re.search(
+            r"--color-text\s*:\s*(?P<value>[^;}]+)",
+            root_match.group("body"),
+            re.IGNORECASE,
+        )
+        if color_match:
+            merged["defaultTextColor"] = color_match.group("value").strip()
+            sources["defaultTextColor"] = "style --color-text"
+        bg_match = re.search(
+            r"--color-bg\s*:\s*(?P<value>[^;}]+)",
+            root_match.group("body"),
+            re.IGNORECASE,
+        )
+        if bg_match:
+            merged["defaultBackground"] = bg_match.group("value").strip()
+            sources["defaultBackground"] = "style --color-bg"
+
+    if not template_analysis:
+        return merged
+
+    if not merged.get("defaultTextColor"):
+        theme_text = (template_analysis.get("theme_colors") or {}).get("text")
+        if theme_text:
+            merged["defaultTextColor"] = theme_text
+            sources["defaultTextColor"] = "template theme text colour (style has no --color-text)"
+
+    analyzed_fonts = template_analysis.get("fonts") or {}
+    if analyzed_fonts:
+        fonts = merged.get("fonts")
+        if not isinstance(fonts, dict):
+            fonts = {}
+        else:
+            fonts = dict(fonts)
+        for key, value in analyzed_fonts.items():
+            if value and not fonts.get(key):
+                fonts[key] = value
+                sources["fonts"] = "template"
+        merged["fonts"] = fonts
+
+    analyzed_size = template_analysis.get("slide_size") or template_analysis.get("slideSize") or {}
+    if analyzed_size:
+        slide_size = merged.get("slideSize")
+        if not isinstance(slide_size, dict):
+            slide_size = {}
+        else:
+            slide_size = dict(slide_size)
+        for key, value in analyzed_size.items():
+            if value is not None and not slide_size.get(key):
+                slide_size[key] = value
+                sources["slideSize"] = "template"
+        merged["slideSize"] = slide_size
+
+    return merged
+
+
+def style_field_sources(merged: dict[str, Any]) -> dict[str, str]:
+    """Pop and return where merge_style_metadata took each filled field from."""
+    return merged.pop("_sources", {})
+
+
+def missing_deck_fields(deck_json: dict[str, Any]) -> list[str]:
+    """Return the still-empty fields defined by the deck.json skeleton."""
+    from sdpm.engine.schema import DECK_JSON_SKELETON
+
+    missing: list[str] = []
+    for key in DECK_JSON_SKELETON:
+        if key in ("template", "defaultTextColor") and not deck_json.get(key):
+            missing.append(key)
+        elif key == "fonts":
+            fonts = deck_json.get(key)
+            if not isinstance(fonts, dict) or not any(
+                isinstance(value, str) and value.strip() for value in fonts.values()
+            ):
+                missing.append(key)
+        elif key == "slideSize":
+            size = deck_json.get(key)
+            if not isinstance(size, dict) or not size.get("width") or not size.get("height"):
+                missing.append(key)
+    return missing
+
+
+def _changed_style_fields(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Return style-managed metadata fields whose values changed."""
+    return {
+        key: after[key]
+        for key in ("template", "defaultTextColor", "defaultBackground", "fonts", "slideSize")
+        if after.get(key) != before.get(key) and key in after
+    }
+
+
+def apply_style(
+    deck_dir: str | Path,
+    style: str,
+    template: str = "",
+) -> dict[str, Any]:
+    """Apply a named style and optional template to a deck.
+
+    Writes specs/art-direction.html and completes deck.json (template, defaultTextColor, fonts, slideSize).
 
     Args:
         deck_dir: Deck output directory path.
-        style: Style name (e.g. "elegant-dark").
+        style: Style name (e.g. "report").
+        template: Optional template name, with or without the .pptx extension.
 
     Returns:
-        Dict with status, path, style. Or error key if not found.
+        Dict with status, style, files (paths written; deck.json with its content),
+        updated (changed deck.json fields), sources (where each filled field came from)
+        and missing (fields neither the style nor the template could fill).
     """
     import shutil
+
+    from sdpm.utils.io import read_json, write_json
 
     styles_dirs = get_styles_dirs()
     src = _find_style_in_dirs(style, styles_dirs)
@@ -176,10 +315,112 @@ def apply_style(deck_dir: str | Path, style: str) -> dict[str, Any]:
     deck_path = Path(deck_dir)
     if not deck_path.is_dir():
         return {"error": f"Deck directory not found: {deck_dir}"}
+    deck_json_path = deck_path / "deck.json"
+    if not deck_json_path.exists():
+        return {"error": f"deck.json not found in {deck_dir}"}
+    deck_data = read_json(deck_json_path)
+
+    completed = deepcopy(deck_data)
+    if template:
+        completed["template"] = template
+
+    template_analysis = None
+    if completed.get("template"):
+        from sdpm.engine.analyzer import analyze_template as _analyze
+
+        template_path, _ = _resolve_template(completed, deck_path, get_templates_dirs())
+        template_analysis = _analyze(template_path)
+
+    merged = merge_style_metadata(
+        src.read_text(encoding="utf-8"),
+        template_analysis,
+        completed,
+    )
+    sources = style_field_sources(merged)
+    if template:
+        sources["template"] = "argument"
+    updated = _changed_style_fields(deck_data, merged)
+
     dest = deck_path / "specs" / "art-direction.html"
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
-    return {"status": "ok", "path": str(dest), "style": style}
+    if updated:
+        write_json(deck_json_path, merged, suffix="\n")
+    return {
+        "status": "ok",
+        "style": style,
+        "files": {
+            "specs/art-direction.html": {"path": str(dest), "bytes": dest.stat().st_size},
+            "deck.json": {"path": str(deck_json_path), "content": merged},
+        },
+        "updated": updated,
+        "sources": sources,
+        "missing": missing_deck_fields(merged),
+        # A map of the style file, so the orchestrator can read the parts it needs
+        # (rules, message & outline) with one run_python read_text + line slice.
+        "style_toc": style_toc(src.read_text(encoding="utf-8")),
+    }
+
+
+def style_toc(html: str, snippet: int = 40) -> list[dict[str, Any]]:
+    """Table of contents of a style HTML: one entry per ``<style>`` block and per
+    ``.slide`` element, with its 1-based line, class list, the HTML comments that
+    precede it (first line of each), and the first visible text inside it.
+
+    Structural only — no assumption about how the style is organised beyond
+    ``.slide`` blocks (which the gallery already relies on). A style without them
+    yields an empty list, meaning: read the whole file.
+    """
+    import html as _html
+    import re
+
+    lines = html.splitlines()
+    entries: list[dict[str, Any]] = []
+    pending_comments: list[str] = []
+    in_comment = False
+    open_re = re.compile(r'<(?:div|section|article)\b[^>]*\bclass="([^"]*)"', re.I)
+    tag_re = re.compile(r"<[^>]+>")
+
+    def slide_open(text: str):
+        m = open_re.search(text)
+        return m if m and "slide" in m.group(1).split() else None
+
+    def first_text(start: int) -> str:
+        for j in range(start, min(start + 80, len(lines))):
+            if j > start and slide_open(lines[j]):
+                break
+            text = _html.unescape(tag_re.sub(" ", lines[j])).strip()
+            text = re.sub(r"\s+", " ", text)
+            if text and not text.startswith("<!--"):
+                return text[:snippet]
+        return ""
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if in_comment:
+            if "-->" in stripped:
+                in_comment = False
+            continue
+        if stripped.startswith("<!--"):
+            head = stripped[4:].split("-->")[0].strip()
+            pending_comments.append(head[:60])
+            in_comment = "-->" not in stripped
+            continue
+        if stripped.startswith("<style"):
+            entries.append({"line": i + 1, "kind": "style", "text": ":root tokens + CSS"})
+            pending_comments = []
+            continue
+        m = slide_open(line)
+        if m:
+            entries.append({
+                "line": i + 1,
+                "kind": "slide",
+                "classes": m.group(1).strip(),
+                "comment": " | ".join(pending_comments) or None,
+                "text": first_text(i + 1),
+            })
+            pending_comments = []
+    return entries if any(e["kind"] == "slide" for e in entries) else []
 
 
 def _find_style_in_dirs(name: str, styles_dirs: list[Path]) -> Path | None:
@@ -293,11 +534,9 @@ def init(
         out_dir = _get_output_base_dir() / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    deck_data: dict[str, Any] = {
-        "template": "",
-        "fonts": {"fullwidth": "", "halfwidth": ""},
-        "defaultTextColor": "",
-    }
+    from sdpm.engine.schema import DECK_JSON_SKELETON, complete_deck_skeleton
+
+    deck_data: dict[str, Any] = complete_deck_skeleton(DECK_JSON_SKELETON)
 
     deck_json = out_dir / "deck.json"
     write_json(deck_json, deck_data, suffix="\n")
@@ -329,6 +568,7 @@ class BuildConfig:
     warnings: list[str] = field(default_factory=list)
     lint_diagnostics: list = field(default_factory=list)
     auto_spacing: bool = True  # deck.json "autoSpacing"; False for imported decks
+    default_background: str | None = None  # deck.json "defaultBackground"; None keeps template ground
 
 
 def _assemble_slides_from_dir(
@@ -367,6 +607,56 @@ def _assemble_slides_from_dir(
         slides.append(slide)
 
     return deck_meta, slides
+
+
+def check_specs(
+    deck_dir: str | Path,
+    assigned_slugs: list[str] | None = None,
+) -> dict:
+    """Validate a deck workspace's deck.json and specs/outline.md."""
+    import json
+
+    from sdpm.engine.schema import validate_specs
+
+    deck_path = Path(deck_dir)
+    deck_json_path = deck_path / "deck.json"
+    outline_path = deck_path / "specs" / "outline.md"
+    errors: list[str] = []
+
+    if not deck_json_path.is_file():
+        errors.append("deck.json is missing")
+    if not outline_path.is_file():
+        errors.append("specs/outline.md is missing")
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": [], "slugs": []}
+
+    try:
+        deck_json = json.loads(deck_json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {
+            "ok": False,
+            "errors": ["deck.json is invalid JSON"],
+            "warnings": [],
+            "slugs": [],
+        }
+    if not isinstance(deck_json, dict):
+        return {
+            "ok": False,
+            "errors": ["deck.json must contain an object"],
+            "warnings": [],
+            "slugs": [],
+        }
+
+    try:
+        outline_text = outline_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {
+            "ok": False,
+            "errors": ["specs/outline.md is not valid UTF-8"],
+            "warnings": [],
+            "slugs": [],
+        }
+    return validate_specs(deck_json, outline_text, assigned_slugs)
 
 
 def parse_outline_slugs(outline_path: Path) -> list[str]:
@@ -521,6 +811,7 @@ def _resolve_config(
         warnings=warnings,
         lint_diagnostics=lint_diagnostics,
         auto_spacing=data.get("autoSpacing", True),
+        default_background=data.get("defaultBackground") or None,
     )
 
 
@@ -535,6 +826,7 @@ def _build(config: BuildConfig, output_path: Path) -> Path:
         base_dir=config.base_dir,
         default_text_color=config.default_text_color,
         auto_spacing=config.auto_spacing,
+        default_background=config.default_background,
     )
     for s in config.slides:
         builder.add_slide(s)
@@ -595,8 +887,7 @@ def generate(
     }
     if invalid_layouts:
         result["invalid_layouts"] = [
-            {"slug": e["slug"], "attempted": e["attempted"], "used": e["used"]}
-            for e in invalid_layouts
+            {"slug": e["slug"], "attempted": e["attempted"], "used": e["used"]} for e in invalid_layouts
         ]
     if config.lint_diagnostics:
         result["errors"] = {"lintDiagnostics": config.lint_diagnostics}
@@ -655,6 +946,7 @@ def measure(
             return format_measure_report(results, page_to_slug=page_to_slug)
         finally:
             import shutil
+
             if svg_path:
                 shutil.rmtree(svg_path.parent, ignore_errors=True)
 
@@ -703,6 +995,7 @@ def preview(
     # Preview dir — user-chosen, or project-local _work/ to avoid macOS
     # EDR/DLP blocking system temp
     from sdpm.engine.preview import get_work_dir
+
     work_dir = get_work_dir(input_path.parent if input_path.is_dir() else input_path.resolve().parent)
     if output_dir:
         out_dir = Path(output_dir)
@@ -715,7 +1008,11 @@ def preview(
     # PDF + pdftoppm pipeline
     pdf = out_dir / "slides.pdf"
     if not export_pdf(out, pdf, work_dir=work_dir):
-        raise RuntimeError("PDF export failed. Is LibreOffice (soffice) installed?")
+        from sdpm.engine.preview.environment import preview_environment
+
+        env = preview_environment()
+        hint = f" Install: {env['install']}" if env["missing"] else ""
+        raise RuntimeError(f"PDF export failed. Is LibreOffice (soffice) installed?{hint}")
 
     cmd = ["pdftoppm", "-png", "-scale-to", "1280", str(pdf), str(out_dir / "page")]
     result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
@@ -758,7 +1055,7 @@ def _extract_slide_titles(prs) -> dict[int, str]:
             title = slide.shapes.title.text.strip().replace("\n", " ")[:30]
         # Sanitise for filenames: drop reserved chars, collapse whitespace, trim.
         title = re.sub(r'[\\/:*?"<>|]', "", title)
-        title = re.sub(r'\s+', "_", title).strip("_")
+        title = re.sub(r"\s+", "_", title).strip("_")
         titles[i] = title or "notitle"
     return titles
 
@@ -844,7 +1141,8 @@ def code_block(
                 "align": "left",
                 "fill": inverse_bg,
                 "text": f"{{{{#{label_fg}:{label_text}}}}}",
-                "marginLeft": 50000,
+                # Margins are px (the builder converts px -> EMU), not EMU.
+                "marginLeft": 8,
                 "marginTop": 0,
                 "marginRight": 0,
                 "marginBottom": 0,
@@ -866,9 +1164,14 @@ def code_block(
             "width": width,
             "height": code_height,
             "fontSize": font_size,
+            "fontFamily": "Courier New",
             "align": "left",
             "fill": bg,
             "text": spans,
+            "marginLeft": 8,
+            "marginTop": 5,
+            "marginRight": 8,
+            "marginBottom": 5,
         }
     )
 
@@ -878,6 +1181,7 @@ def code_block(
 # ---------------------------------------------------------------------------
 # Diff — load/build both sides, then delegate to the pure engine comparison
 # ---------------------------------------------------------------------------
+
 
 def _load_deck_as_roundtrip(deck_dir: Path) -> dict:
     """Load deck-structure output (deck.json + slides/*.json) as a single roundtrip dict.
@@ -915,6 +1219,13 @@ def load_slides_json_or_pptx(path) -> dict:
 
     from sdpm.config import SCRIPTS_DIR
 
+    converter_script = SCRIPTS_DIR / "pptx_to_json.py"
+    converter_command = (
+        [sys.executable, str(converter_script)]
+        if converter_script.is_file()
+        else [sys.executable, "-m", "sdpm.engine.converter"]
+    )
+
     path_obj = Path(path)
     if path_obj.is_dir():
         # Deck-structure directory (deck.json + slides/*.json + specs/outline.md):
@@ -926,18 +1237,24 @@ def load_slides_json_or_pptx(path) -> dict:
             generate(path_obj, output_path=tmp_pptx)
             rt_dir = Path(tmpdir) / "rt"
             subprocess.run(  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                [sys.executable, str(SCRIPTS_DIR / "pptx_to_json.py"), str(tmp_pptx), "-o", str(rt_dir)],
-                capture_output=True, text=True, check=True,
+                [*converter_command, str(tmp_pptx), "-o", str(rt_dir)],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             return _load_deck_as_roundtrip(rt_dir)
     if str(path).endswith(".pptx"):
         with tempfile.TemporaryDirectory() as tmpdir:
             subprocess.run(  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                [sys.executable, str(SCRIPTS_DIR / "pptx_to_json.py"), path, "-o", tmpdir],
-                capture_output=True, text=True, check=True,
+                [*converter_command, path, "-o", tmpdir],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             # New deck-structure output: deck.json + slides/slide-NN.json
             return _load_deck_as_roundtrip(Path(tmpdir))
+    from sdpm.engine.schema import is_comment_element
+
     with open(path) as f:
         data = json.load(f)
     # Check if this is a source JSON (not already a roundtrip JSON) by looking
@@ -946,19 +1263,19 @@ def load_slides_json_or_pptx(path) -> dict:
         any(k in el for k in ("text", "src", "chartData", "include"))
         for s in data.get("slides", [])
         for el in s.get("elements", [])
-        if not isinstance(el, str) and "_comment" not in el
+        if not is_comment_element(el) and not isinstance(el, str)
     )
     # Also treat as source if slides have layout/title but no elements (title, agenda, section, etc.)
     if not is_source:
         is_source = any(
-            s.get("layout") in ("title", "agenda", "section", "subsection", "thankyou")
-            and not s.get("elements")
+            s.get("layout") in ("title", "agenda", "section", "subsection", "thankyou") and not s.get("elements")
             for s in data.get("slides", [])
         )
     if is_source:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_pptx = Path(tmpdir) / "tmp.pptx"
             from sdpm.engine.builder import PPTXBuilder, resolve_override
+
             tpl_name = data.get("template")
             if not tpl_name:
                 raise ValueError('No "template" specified in JSON. Cannot build for diff.')
@@ -971,15 +1288,21 @@ def load_slides_json_or_pptx(path) -> dict:
                     raise FileNotFoundError(
                         f"Template not found: '{tpl_name}'. Use list_templates to see available templates."
                     )
-            builder = PPTXBuilder(template, fonts=data.get("fonts"), base_dir=Path(path).parent,
-                                  default_text_color=data.get("defaultTextColor", "#FFFFFF"))
+            builder = PPTXBuilder(
+                template,
+                fonts=data.get("fonts"),
+                base_dir=Path(path).parent,
+                default_text_color=data.get("defaultTextColor", "#FFFFFF"),
+            )
             id_map = {s["id"]: s for s in data.get("slides", []) if "id" in s}
             for slide_def in data.get("slides", []):
                 builder.add_slide(resolve_override(slide_def, id_map))
             builder.save(tmp_pptx)
             subprocess.run(  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                [sys.executable, str(SCRIPTS_DIR / "pptx_to_json.py"), str(tmp_pptx), "-o", tmpdir],
-                capture_output=True, text=True, check=True,
+                [*converter_command, str(tmp_pptx), "-o", tmpdir],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             return _load_deck_as_roundtrip(Path(tmpdir))
     return data
@@ -988,7 +1311,7 @@ def load_slides_json_or_pptx(path) -> dict:
 def diff_report(baseline, edited) -> dict:
     """Compare two decks/JSONs/PPTXs and return a hand-edit diff report.
 
-    The canonical implementation behind ``pptx_builder.py diff`` and the
+    The canonical implementation behind ``pptx_builder.py diff_pptx`` and the
     MCP ``diff_pptx`` tool. Loads/builds both sides, then delegates the
     comparison to :func:`sdpm.engine.diff.diff_slides`.
 

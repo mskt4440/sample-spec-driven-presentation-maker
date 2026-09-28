@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-"""PPTX Builder CLI - backward compatible entry point.
+"""PPTX Builder CLI - contract-aligned entry point.
 
 All core logic lives in sdpm package.
 This file provides the CLI interface only.
@@ -24,6 +24,7 @@ from sdpm.knowledge.assets import (  # noqa: F401
     check_icon_exists,
     print_search_results,
     resolve_asset_path,
+    AssetsNotInstalledError,
     resolve_icon_path,
     search_assets,
 )
@@ -255,89 +256,53 @@ def cmd_list_templates(args):
         print(f"  {t['name']:<24} [{t['source']}]  {paths[t['name']]}{desc}")
 
 
-def cmd_search_patterns(args):
-    """Search patterns by keywords."""
-    from sdpm.knowledge.reference import search_patterns
-    results = search_patterns(args.query, limit=args.limit)
-    if not results:
-        print("No matches found.")
-        return
-    for r in results:
-        page = f"/{r['page']}" if r.get('page') else ""
-        print(f"  {r['path']}{page}  {r['description']}")
+def cmd_list_styles(args):
+    """List design styles (user-local + bundled) with their HTML paths.
+
+    Mirrors the ``list_styles`` tool: pinned + user styles by default,
+    ``--all`` for every bundled style. Opens the browser gallery unless
+    ``--no-browse``. Apply a style by copying its HTML to ``specs/art-direction.html``.
+    """
+    from sdpm.api import _find_style_in_dirs, get_styles_dirs
+    from sdpm.knowledge.reference import open_styles_gallery
+    from sdpm import tools
+
+    styles_dirs = get_styles_dirs()
+    result = tools.list_styles(include_all=args.all)
+    for st in result["styles"]:
+        path = _find_style_in_dirs(st["name"], styles_dirs)
+        pin = " *" if st.get("pinned") else ""
+        print(f"  {st['name']:<24} [{st['source']}]{pin}  {path}  — {st['description']}")
+    if result.get("other_styles"):
+        print(f"# Hidden by pins (pass --all): {', '.join(result['other_styles'])}", file=sys.stderr)
+    if not args.no_browse:
+        open_styles_gallery(styles_dirs)
 
 
-def cmd_examples(args):
-    """List or show design examples (components/patterns/styles)."""
-    from sdpm.knowledge.reference import open_styles_gallery, read_docs
+def cmd_start(args):
+    """Print a role's entry payload (start_presentation / start_composing / start_style / start_translation)."""
+    import json
 
-    examples_dir = Path(__file__).parent.parent / "references" / "examples"
-    if not examples_dir.exists():
-        print("Directory not found: references/examples", file=sys.stderr)
-        return
+    from sdpm import tools
 
-    names = args.names
-    if not names:
-        print("Usage: examples <category> or <category/name>", file=sys.stderr)
-        return
-
-    for name in names:
-        parts = name.split("/", 1)
-        base = parts[0]
-        sub = parts[1] if len(parts) > 1 else None
-
-        # styles/ directory — searches user-local + bundled
-        if base == "styles":
-            from sdpm.api import get_styles_dirs
-            from sdpm.knowledge.reference import list_styles_merged
-            styles_dirs = get_styles_dirs()
-            if sub is None:
-                for s in list_styles_merged(styles_dirs):
-                    print(f"  styles/{s['name']}  {s['description']}")
-                if not args.no_browse:
-                    open_styles_gallery(styles_dirs)
-            else:
-                from sdpm.api import _find_style_in_dirs
-                src = _find_style_in_dirs(sub, styles_dirs)
-                if src is None:
-                    print(f"# Style not found: {sub}", file=sys.stderr)
-                else:
-                    print(f"# cp {src} specs/art-direction.html")
-            continue
-
-        # pptx files (components, patterns)
-        query = f"{base}/{sub}" if sub else base
-        try:
-            docs = read_docs(examples_dir, [query])
-            for doc in docs:
-                print(doc["content"])
-                print()
-        except FileNotFoundError:
-            print(f"# Not found: {base}", file=sys.stderr)
-            cats = []
-            for f in sorted(examples_dir.iterdir()):
-                if f.suffix == ".pptx":
-                    cats.append(f.stem)
-                elif f.is_dir() and not f.name.startswith('.'):
-                    cats.append(f"{f.name}/")
-            print(f"# Available: {', '.join(cats)}", file=sys.stderr)
-
-
-def cmd_workflows(args):
-    """List or show workflow documents."""
-    from sdpm.knowledge.reference import list_category, read_docs
-    d = Path(__file__).parent.parent / "references" / "workflows"
-    if not args.names:
-        print("# Workflows")
-        for item in list_category(d):
-            print(f"  {item['name']:<36} {item['description']}")
+    role = args.role
+    if role == "presentation":
+        payload = tools.start_presentation()
+    elif role == "composing":
+        payload = tools.start_composing(args.deck or "", args.slugs or None)
+    elif role == "style":
+        payload = tools.start_style(args.base or "")
+    elif role == "translation":
+        if not args.deck or not args.language:
+            print("# start translation needs --deck and --language", file=sys.stderr)
+            return
+        payload = tools.start_translation(args.deck, args.language)
+    else:  # pragma: no cover - argparse restricts choices
+        raise SystemExit(f"unknown role: {role}")
+    if args.workflow_only:
+        print(payload.get("static", {}).get("workflow", ""))
     else:
-        try:
-            for doc in read_docs(d, args.names):
-                print(doc["content"])
-                print()
-        except FileNotFoundError as e:
-            print(f"# {e}", file=sys.stderr)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def cmd_guides(args):
@@ -618,7 +583,7 @@ def main():
     parser = argparse.ArgumentParser(description="PPTX Builder")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    p_gen = subparsers.add_parser("generate", help="Generate PPTX from JSON")
+    p_gen = subparsers.add_parser("generate_pptx", help="Generate PPTX from JSON")
     p_gen.add_argument("input", nargs="?", help="Input JSON file (or - for stdin)")
     p_gen.add_argument("-o", "--output", required=True, help="Output PPTX path")
     p_gen.add_argument("--keep-empty-placeholders", action="store_true", help="Keep empty placeholders visible")
@@ -637,7 +602,7 @@ def main():
     p_meas.add_argument("input", help="Input JSON file")
     p_meas.add_argument("-p", "--pages", help="Slide numbers to measure (e.g. 1,3,5)")
 
-    p_search = subparsers.add_parser("search-assets", help="Search assets (icons, images, etc.)")
+    p_search = subparsers.add_parser("search_assets", help="Search assets (icons, images, etc.)")
     p_search.add_argument("query", help="Search keywords (space-separated)")
     p_search.add_argument("-n", "--limit", type=int, default=20, help="Max results (default: 20)")
     p_search.add_argument("-s", "--source", help="Filter by source (e.g. aws, material)")
@@ -647,29 +612,30 @@ def main():
     # Backward-compatible alias removed (icon-search was alias for search-assets)
 
     subparsers.add_parser("list-asset-sources", help="List available asset sources")
-    subparsers.add_parser("list-templates", help="List available PPTX templates")
+    subparsers.add_parser("list_templates", help="List available PPTX templates")
 
-    p_ex = subparsers.add_parser("examples", help="List or show design pattern/component examples")
-    p_ex.add_argument("names", nargs="*", help="Example names to show (multiple allowed)")
-    p_ex.add_argument("--no-browse", action="store_true", help="Don't open browser for styles")
+    p_ls = subparsers.add_parser("list_styles", help="List design styles (user-local + bundled)")
+    p_ls.add_argument("--all", action="store_true", help="Include styles hidden by pins")
+    p_ls.add_argument("--no-browse", action="store_true", help="Don't open the browser gallery")
 
-    p_exs = subparsers.add_parser("search-patterns", help="Search patterns by keywords")
-    p_exs.add_argument("query", help="Search keywords (space-separated)")
-    p_exs.add_argument("-n", "--limit", type=int, default=5, help="Max results")
+    p_start = subparsers.add_parser("start", help="Role entry payload: role document + what the role reads first")
+    p_start.add_argument("role", choices=["presentation", "composing", "style", "translation"])
+    p_start.add_argument("--deck", help="Deck directory (composing / translation)")
+    p_start.add_argument("--slugs", nargs="*", help="Assigned slugs (composing)")
+    p_start.add_argument("--base", help="Base style name (style)")
+    p_start.add_argument("--language", help="Target language (translation)")
+    p_start.add_argument("--workflow-only", action="store_true", help="Print only the role document")
 
-    p_wf = subparsers.add_parser("workflows", help="List or show workflow documents")
-    p_wf.add_argument("names", nargs="*", help="Workflow names to show (multiple allowed)")
-
-    p_gd = subparsers.add_parser("guides", help="List or show guide documents")
+    p_gd = subparsers.add_parser("read_guides", help="List or show guide documents")
     p_gd.add_argument("names", nargs="*", help="Guide names to show (multiple allowed)")
 
-    p_init = subparsers.add_parser("init", help="Initialize output directory with empty presentation JSON")
+    p_init = subparsers.add_parser("init_deck_workspace", help="Create an empty deck workspace (deck.json, slides/, specs/)")
     p_init.add_argument("name", nargs="?", help="Presentation name (e.g. 'my-proposal')")
     p_init.add_argument("-o", "--output", help="Output directory (overrides default)")
 
-    p_layout = subparsers.add_parser("layout", help="Compute layout coordinates from logical structure JSON")
+    p_layout = subparsers.add_parser("arch_diagram", help="Compute layout coordinates from logical structure JSON")
 
-    p_code = subparsers.add_parser("code-block", help="Generate elements JSON for syntax-highlighted code block")
+    p_code = subparsers.add_parser("code_to_slide", help="Generate elements JSON for syntax-highlighted code block")
     p_code.add_argument("input", help="Source code file (or - for stdin)")
     p_code.add_argument("-o", "--output", help="Output elements JSON file (default: stdout)")
     p_code.add_argument("--language", "-l", default="text", help="Language for highlighting (default: text)")
@@ -689,11 +655,11 @@ def main():
     p_layout.add_argument("--height", type=int, default=None, help="Target area height (px)")
     p_layout.add_argument("--theme", choices=["dark", "light"], default="dark", help="Theme for box text colors (default: dark)")
 
-    p_diff = subparsers.add_parser("diff", help="Compare two decks/JSONs/PPTXs and show changes (for manual edit detection)")
+    p_diff = subparsers.add_parser("diff_pptx", help="Compare two decks/JSONs/PPTXs and show changes (for manual edit detection)")
     p_diff.add_argument("baseline", help="Baseline deck directory, slides JSON, or PPTX (original)")
     p_diff.add_argument("edited", help="Edited deck directory, slides JSON, or PPTX (manually edited)")
 
-    p_analyze = subparsers.add_parser("analyze-template", help="Analyze PPTX template: extract layouts and theme")
+    p_analyze = subparsers.add_parser("analyze_template", help="Analyze PPTX template: extract layouts and theme")
     p_analyze.add_argument("input", help="Template PPTX file path")
     p_analyze.add_argument("--layout", help="Show placeholder details for a specific layout name")
 
@@ -709,35 +675,33 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "generate":
+    if args.command == "generate_pptx":
         cmd_generate(args)
     elif args.command == "preview":
         cmd_preview(args)
     elif args.command == "measure":
         cmd_measure(args)
-    elif args.command == "search-assets":
+    elif args.command == "search_assets":
         cmd_search_assets(args)
     elif args.command == "list-asset-sources":
         cmd_list_asset_sources(args)
-    elif args.command == "list-templates":
+    elif args.command == "list_templates":
         cmd_list_templates(args)
-    elif args.command == "examples":
-        cmd_examples(args)
-    elif args.command == "search-patterns":
-        cmd_search_patterns(args)
-    elif args.command == "workflows":
-        cmd_workflows(args)
-    elif args.command == "guides":
+    elif args.command == "list_styles":
+        cmd_list_styles(args)
+    elif args.command == "start":
+        cmd_start(args)
+    elif args.command == "read_guides":
         cmd_guides(args)
-    elif args.command == "init":
+    elif args.command == "init_deck_workspace":
         cmd_init(args)
-    elif args.command == "layout":
+    elif args.command == "arch_diagram":
         cmd_layout(args)
-    elif args.command == "code-block":
+    elif args.command == "code_to_slide":
         cmd_code_block(args)
-    elif args.command == "diff":
+    elif args.command == "diff_pptx":
         cmd_diff(args)
-    elif args.command == "analyze-template":
+    elif args.command == "analyze_template":
         cmd_analyze_template(args)
     elif args.command == "image-size":
         cmd_image_size(args)
@@ -745,4 +709,12 @@ def main():
         cmd_grid(args)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except AssetsNotInstalledError as error:
+        print("=" * 60, file=sys.stderr)
+        print("CRITICAL: Assets not installed. Cannot continue.", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print(f"  Run: {error.install_command}", file=sys.stderr)
+        print("Stop current work and install the required assets.", file=sys.stderr)
+        sys.exit(1)

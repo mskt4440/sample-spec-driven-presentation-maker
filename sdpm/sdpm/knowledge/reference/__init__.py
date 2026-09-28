@@ -7,6 +7,7 @@ See docs/internal/DATASET_COMPLIANCE.md for dataset provenance.
 
 Reference: unified access to design patterns, components, schemas, rules, and reviews."""
 from pathlib import Path
+from typing import Any
 
 from sdpm.config import REFERENCES_DIR
 from sdpm.knowledge.reference.providers import FileProvider, ReferenceProvider  # noqa: F401
@@ -167,61 +168,6 @@ new ResizeObserver(fit).observe(document.getElementById('main'));
     out = Path(tempfile.gettempdir()) / "sdpm-styles-index.html"
     out.write_text(index_html, encoding="utf-8")
     return out
-
-
-def search_patterns(query: str, limit: int = 0) -> list[dict]:
-    """Search pattern notes by keywords.
-
-    Searches speaker notes across all pptx files in references/examples/
-    and md files in references/examples/styles/.
-    Returns matching entries with their 1st-line description.
-    limit=0 means no limit (return all matches).
-    """
-    import re
-
-    from pptx import Presentation
-
-    examples_dir = REFERENCES_DIR / "examples"
-    if not examples_dir.exists():
-        return []
-
-    queries = query.lower().split()
-    pats = [re.compile(r'\b' + re.escape(q) + r'\b') for q in queries]
-    results: list[tuple[int, str, int, str]] = []
-
-    # Search pptx files (patterns only)
-    patterns_pptx = examples_dir / "patterns.pptx"
-    if patterns_pptx.exists():
-        try:
-            prs = Presentation(str(patterns_pptx))
-        except Exception:
-            prs = None
-        if prs:
-            for si, slide in enumerate(prs.slides):
-                if not slide.has_notes_slide:
-                    continue
-                notes = slide.notes_slide.notes_text_frame.text.replace('\x0B', '\n')
-                if not notes.strip():
-                    continue
-                notes_lower = notes.lower()
-                match_count = sum(1 for p in pats if p.search(notes_lower))
-                if match_count == 0:
-                    continue
-                desc = ""
-                for line in notes.splitlines():
-                    if line.strip():
-                        desc = line.strip()
-                        break
-                results.append((match_count, "patterns", si + 1, desc))
-
-    results.sort(key=lambda x: (-x[0], x[1], x[2]))
-    out = []
-    for r in results:
-        entry: dict = {"path": r[1], "description": r[3]}
-        if r[2] > 0:
-            entry["page"] = r[2]
-        out.append(entry)
-    return out[:limit] if limit else out
 
 
 def list_pptx_descriptions(pptx_path):
@@ -429,3 +375,37 @@ def filter_styles(
         return result
 
     return [s for s in result if s["pinned"] or s["source"] == "user"]
+
+
+HIDDEN_STYLES_HINT = (
+    "Styles listed in other_styles exist too but were left out because they are "
+    "neither pinned nor user-created. When the user names one of them, use it "
+    "directly (apply_style accepts any name here) — do not report it as missing. "
+    "Call list_styles(include_all=True) to see their descriptions."
+)
+
+
+def build_styles_listing(
+    styles: list[dict],
+    pinned_names: list[str],
+    include_all: bool = False,
+) -> dict[str, Any]:
+    """Build the ``list_styles`` tool payload.
+
+    Pure function shared by MCP Local and MCP Remote. Wraps
+    :func:`filter_styles` and, whenever the pin filter actually dropped
+    something, also returns the dropped names plus a hint so the agent
+    never mistakes a hidden style for a non-existent one.
+
+    Returns:
+        ``{"styles": [...]}``; when styles were hidden, additionally
+        ``"other_styles": [names]`` and ``"hint": str``.
+    """
+    shown = filter_styles(styles, pinned_names, include_all)
+    shown_names = {s["name"] for s in shown}
+    hidden = [s["name"] for s in styles if s["name"] not in shown_names]
+    payload: dict[str, Any] = {"styles": shown}
+    if hidden:
+        payload["other_styles"] = hidden
+        payload["hint"] = HIDDEN_STYLES_HINT
+    return payload

@@ -20,12 +20,14 @@ Layer 4 hosts the Strands Agent (SPEC agent + composer agents) and the React Web
 The SPEC agent handles user dialogue (Phase 1). Composer agents handle slide generation
 (Phase 2+3) via the `compose_slides` tool (Agents as Tools pattern).
 
-Mode behavior (vibe / spec / style / composer) lives in `personas/*.md` and is
-served to MCP clients via `start_presentation(mode=...)`. Client-side files are thin
-wiring (composer sub-agent registration). The L4 agent fetches personas through the
-same port (`Source.mcp("start_presentation", ...)` in `agent/modes/`); only
-transport-specific wiring (attachment wire format, compose_slides report format)
-lives in `agent/prompts/`.
+Role and procedure text lives in `sdpm/references/workflows/<role>.md` (orchestrator,
+composer, style, translate) and reaches MCP clients through the role's entry tool
+(`start_presentation` / `start_composing` / `start_style` / `start_translation`), which also
+returns what that role reads first (`sdpm.entry`).
+Client-side files are thin wiring (composer sub-agent registration) that name a role
+document without restating it. The L4 agent fetches role documents through the same
+port (`Source.mcp("start_*", pick="static.workflow")` in `agent/modes/`); only transport-specific
+wiring (attachment wire format, compose_slides report format) lives in `agent/prompts/`.
 
 ## Design Philosophy — Ports and Adapters
 
@@ -52,37 +54,33 @@ Rules that follow from this:
    abstraction; S3/DynamoDB live entirely inside `servers/remote`. This trades
    hexagonal purity for one less abstraction — acceptable while there is a
    single cloud backend. Revisit only if a second backend appears.
-4. **Personas are content, not client config** ("server-driven behavior").
-   Behavior is served through the port via `start_presentation(mode=...)`,
-   so client-side files stay minimal wiring and never duplicate behavior text.
+4. **Role documents are content, not client config** ("server-driven behavior").
+   Each role (orchestrator, composer, style, translate) has exactly one document,
+   `sdpm/references/workflows/<role>.md`, served through the port via
+   the role's `start_*` entry tool. Entry points (the `sdpm-*` prompts, ACP agent
+   definitions, `SKILL.md`, server instructions) only ever name a role document — they
+   never restate or duplicate its content. Nothing else lives on the client side: a client
+   holds the one line that starts the server, written by `sdpm register`.
 
-   Deciding *how* a client obtains a persona is a two-axis judgement:
-
-   - **When is the mode known?** If it is only decided in conversation
-     (user picks vibe/spec/style), the agent must fetch via
-     `start_presentation` — the default. If the mode is fixed at the
-     entry point (a dedicated composer sub-agent, the L4 agent's modes),
-     the persona may be embedded into the system prompt — but only when
-     it is **re-derived at reference/build time from `personas/`**
-     (never a hand-maintained copy).
-   - **Does the definition cross a distribution boundary?** Anything
-     copied into user-owned locations (`~/.kiro/agents/`, plugin files)
-     drifts silently after `git pull`. Prefer definitions that resolve
-     the persona live from the checkout / server; treat boundary-crossing
-     copies as generated artifacts that must be re-derivable.
-
-   Two orthogonal follow-ons: *delivery* (through the port vs. file read)
-   and *placement* (system prompt vs. task prompt) are independent choices —
-   picking one does not constrain the other. Tool docstrings (e.g.
-   `start_presentation`'s mode list) are the discovery layer — the
-   equivalent of skill frontmatter; do not create skill stubs for modes.
+   Role assignment is a dispatch-time decision, not a discovery-time one: a
+   spawner (the orchestrator delegating to a composer, a prompt dispatching a
+   role, a client picking a mode) tells the spawned agent which role to load in
+   its first instruction. The agent then calls `start_<role>(...)`
+   itself. There is no docstring heuristic to infer role from arguments, and no
+   case where a role's text is embedded into a system prompt instead of fetched
+   — every consumer, including the L4 agent, fetches live.
 5. **Change-locality goal** — the structure is optimised so that:
-   prompt changes touch only `personas/`; engine changes touch only
-   `sdpm/sdpm/engine/`; a new client touches only `clients/`; a new tool
-   touches only `sdpm/sdpm/tools/`.
+   prompt changes touch only `sdpm/references/workflows/`; engine changes touch only
+   `sdpm/sdpm/engine/`; a new MCP client touches only the client table in
+   `servers/local/client_config.py`; a new tool touches only `sdpm/sdpm/tools/`.
 
-Known debt against this philosophy (tracked for v0.5.x):
-`api/index.py` has no test coverage.
+Known debt against this philosophy:
+- `api/index.py` has no test coverage (tracked for v0.5.x).
+- `sdpm.tools.attachment.pipeline` imports the repository-level `shared` package,
+  so the core currently depends outward on shared application code. Harmless while the
+  server always runs from a checkout; move the required attachment logic inward before
+  the core is ever packaged on its own.
+
 (v0.5.2 resolved: `converter/elements.py` monolith → `converter/elements/`
 package with an enforced dependency DAG; scale state → ContextVar scope.)
 
@@ -110,14 +108,46 @@ Every MCP tool is defined once here: name, signature, docstring, and logic
 functions directly (`mcp.tool()(tools.xxx)`) — never redefine a tool body
 in a server.
 
-`start_presentation(mode=...)` is part of the contract and serves
-`personas/*.md` to any MCP client.
+The `start_*` entry tools are part of the contract: each serves
+`sdpm/references/workflows/<role>.md` plus that role's first inputs (`sdpm.entry`,
+Path-based; the remote server materialises the deck from S3 and calls the same code).
 
 ## Local server (`servers/local/`) — Layer 2
 
 stdio MCP + ACP server for local environments. Must be a **thin bind** of
 `sdpm.tools`. Local-transport specifics (session-scoped upload staging,
 browser style gallery, ACP hearing UI) are the only allowed additions.
+
+`servers/local/client_config.py` is the one place that knows about MCP clients: one
+server template (absolute `uv` + absolute checkout, never a launcher or `PATH`), per-client
+registration through the client's own CLI, a dedicated agent for Kiro CLI, detection of the
+old installer's leftovers. The `sdpm` launcher (`scripts/install/launcher.{sh,ps1}`) only
+delegates to it — never reimplement client logic in shell.
+
+## Onboarding — one install, one launcher
+
+Users install once (`scripts/install/dist/install.{sh,ps1}` → `~/.sdpm/checkout`) and get
+every surface from that checkout: `sdpm webui`, `sdpm register` (MCP clients), `sdpm update`.
+Nothing behavioural lives on the client side — a client holds the one line that starts the
+server; Kiro CLI holds it inside a generated `sdpm` agent (wiring only: no prompt, no
+`file://`, sub-agents restricted to itself). Rules that follow:
+
+- Never write another application's config file; use the client's CLI (`kiro-cli mcp`,
+  `claude mcp`, `code --add-mcp`, `codex mcp`) or print the JSON. Files we create must carry
+  our marker and be removed by `unregister` / `uninstall`; a user's own file of the same
+  name is left alone.
+- Environment gaps are reported at the point of need, once (`preview` →
+  `{"status": "unavailable", "install": …}`; `search_assets` → catalog missing / installing).
+  `start_presentation` carries no environment or update nags.
+- Developers run their clone *next to* the installed release: `make register-dev`
+  (agent `sdpm-dev`), `cd web-ui && npm run dev:local`. Never re-point the installed `sdpm`
+  agent at a working tree.
+- Change anything under `scripts/install/` → `bash scripts/install/build.sh` (CI rejects
+  drift) and read `scripts/install/README.md` for the isolated-home smoke test.
+
+Read before touching onboarding: `docs/en/getting-started.md` (user contract),
+`docs/en/migration-onboarding.md` (what was removed and why), `scripts/install/README.md`
+(build + smoke), `tests/test_client_config.py` (the guarded invariants).
 
 ## Remote server (`servers/remote/`) — Layer 3
 
@@ -130,8 +160,8 @@ HTTP MCP server running on AWS with S3/DynamoDB dependencies.
 - However, use Engine logic when equivalent functionality exists
 - Server instructions are a deliberate divergence: Local serves the shared
   interactive menu (`sdpm.tools.instructions`); Remote serves a short
-  agent-facing form (its client is the L4 agent, which already carries the
-  persona) — see the comment above `_INSTRUCTIONS` in `servers/remote/server.py`
+  agent-facing form (its client is the L4 agent, which already knows its
+  role) — see the comment above `_INSTRUCTIONS` in `servers/remote/server.py`
 
 ## Logic Sharing Principles
 
@@ -207,6 +237,17 @@ Update these 3 files:
 
 `compose_capable` / `composable` controls whether the model appears in the Create picker.
 Set to `false` for models below Sonnet-class capability.
+
+Optionally add the ID to `model.recommendedModelIds` to list it under the
+"Recommended" heading in the picker (everything else goes under "Other models",
+order follows `allowedModelIds`). Both `defaults.chat` / `defaults.create` must be
+in that list when it is present; `infra/bin/infra.ts` validates this at synth.
+
+Pick the profile from behaviour, not from the announcement: probe the model with
+`aws bedrock-runtime converse` using `temperature=0.1`, `temperature=1.0`, no
+temperature, and a `cachePoint` system block. "temperature is deprecated" →
+`CLAUDE_EXTENDED_THINKING`; temperature rejected at any value plus cachePoint
+`AccessDeniedException` → `NO_TEMPERATURE_IMPLICIT_CACHE`.
 
 ## Web UI: Typography & Sizing
 

@@ -30,17 +30,13 @@ def test_styles_dir_includes_bundled() -> None:
     assert BUNDLED_STYLES_DIR in dirs
 
 
-def test_styles_dir_respects_env(
-    monkeypatch: pytest.MonkeyPatch, temp_styles_dir: Path
-) -> None:
+def test_styles_dir_respects_env(monkeypatch: pytest.MonkeyPatch, temp_styles_dir: Path) -> None:
     monkeypatch.setenv("SDPM_STYLES_DIR", str(temp_styles_dir))
     dirs = get_styles_dirs()
     assert dirs[0] == temp_styles_dir
 
 
-def test_styles_dir_includes_user_local(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_styles_dir_includes_user_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """User-local styles dir appears between env override and bundled."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setenv("APPDATA", str(tmp_path))
@@ -50,9 +46,7 @@ def test_styles_dir_includes_user_local(
     assert dirs[-1] == BUNDLED_STYLES_DIR
 
 
-def test_styles_dir_supports_multiple_env_paths(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_styles_dir_supports_multiple_env_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     d1 = tmp_path / "a"
     d2 = tmp_path / "b"
     d1.mkdir()
@@ -212,6 +206,36 @@ def test_filter_styles_with_pins_filters_to_pinned_and_user() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_styles_listing
+# ---------------------------------------------------------------------------
+
+
+from sdpm.knowledge.reference import HIDDEN_STYLES_HINT, build_styles_listing
+
+
+_THREE_STYLES = [
+    {"name": "a", "description": "", "source": "builtin"},
+    {"name": "b", "description": "", "source": "user"},
+    {"name": "c", "description": "", "source": "builtin"},
+]
+
+
+def test_build_styles_listing_reports_hidden_names_and_hint() -> None:
+    payload = build_styles_listing(_THREE_STYLES, pinned_names=["a"], include_all=False)
+    assert [s["name"] for s in payload["styles"]] == ["a", "b"]
+    assert payload["other_styles"] == ["c"]
+    assert payload["hint"] == HIDDEN_STYLES_HINT
+
+
+def test_build_styles_listing_no_extras_when_nothing_hidden() -> None:
+    for pins, include_all in ([], False), (["a"], True):
+        payload = build_styles_listing(_THREE_STYLES, pinned_names=pins, include_all=include_all)
+        assert len(payload["styles"]) == 3
+        assert "other_styles" not in payload
+        assert "hint" not in payload
+
+
+# ---------------------------------------------------------------------------
 # list_styles_filtered (filesystem integration)
 # ---------------------------------------------------------------------------
 
@@ -262,3 +286,249 @@ def test_update_state_creates_and_updates(tmp_path: Path, monkeypatch: pytest.Mo
     update_state("pinned_styles", ["a"])
     state = get_state()
     assert state["pinned_styles"] == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# apply_style metadata
+# ---------------------------------------------------------------------------
+
+
+def test_merge_style_metadata_extracts_root_text_color_without_mutation() -> None:
+    from sdpm.api import merge_style_metadata
+
+    original = {"template": "", "defaultTextColor": "#111111"}
+    html = "<style>body { --color-text: #BADBAD; } :root { --color-text: #ABCDEF; }</style>"
+    result = merge_style_metadata(html, None, original)
+
+    assert result["defaultTextColor"] == "#ABCDEF"
+    assert original["defaultTextColor"] == "#111111"
+
+
+def test_merge_style_metadata_extracts_root_background_as_default_background() -> None:
+    from sdpm.api import merge_style_metadata, style_field_sources
+
+    html = ":root { --color-text: #111111; --color-bg: #FFF6E5; --color-surface: #FFFFFF; }"
+    result = merge_style_metadata(html, None, {"template": ""})
+
+    assert result["defaultBackground"] == "#FFF6E5"
+    assert style_field_sources(result)["defaultBackground"] == "style --color-bg"
+
+
+def test_merge_style_metadata_without_color_bg_leaves_background_unset() -> None:
+    from sdpm.api import merge_style_metadata
+
+    result = merge_style_metadata(":root { --color-text: #111111; }", None, {"template": ""})
+
+    assert "defaultBackground" not in result
+
+
+def test_builder_applies_default_background_to_slides_without_their_own(tmp_path: Path) -> None:
+    from pptx import Presentation
+
+    from sdpm.config import TEMPLATES_DIR
+    from sdpm.engine.builder import PPTXBuilder
+
+    builder = PPTXBuilder(
+        TEMPLATES_DIR / "blank-light.pptx",
+        fonts={"fullwidth": "Arial", "halfwidth": "Arial"},
+        default_text_color="#111111",
+        default_background="#FFF6E5",
+    )
+    assert builder.is_dark is False
+    builder.add_slide({"layout": "Blank", "elements": []})
+    builder.add_slide({"layout": "Blank", "background": "#0A0A0A", "elements": []})
+    out = tmp_path / "out.pptx"
+    builder.save(out)
+
+    slides = Presentation(str(out)).slides
+    assert str(slides[0].background.fill.fore_color.rgb) == "FFF6E5"
+    assert str(slides[1].background.fill.fore_color.rgb) == "0A0A0A"
+
+
+def test_merge_style_metadata_fills_only_empty_template_fields() -> None:
+    from sdpm.api import merge_style_metadata
+
+    deck = {
+        "fonts": {"fullwidth": "Existing JP", "halfwidth": ""},
+        "slideSize": {"width": 1600, "height": ""},
+    }
+    analysis = {
+        "fonts": {"fullwidth": "Analyzed JP", "halfwidth": "Analyzed Latin"},
+        "slide_size": {"width": 1920, "height": 1080, "ptPerPx": 0.5},
+    }
+    result = merge_style_metadata(
+        ":root { --color-text: rgb(1, 2, 3); }",
+        analysis,
+        deck,
+    )
+
+    assert result["defaultTextColor"] == "rgb(1, 2, 3)"
+    assert result["fonts"] == {
+        "fullwidth": "Existing JP",
+        "halfwidth": "Analyzed Latin",
+    }
+    assert result["slideSize"] == {
+        "width": 1600,
+        "height": 1080,
+        "ptPerPx": 0.5,
+    }
+
+
+def test_apply_style_without_template_updates_only_text_color(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sdpm.api import apply_style
+
+    styles = tmp_path / "styles"
+    styles.mkdir()
+    (styles / "custom.html").write_text(
+        "<style>:root { --color-text: #123456; }</style>",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SDPM_STYLES_DIR", str(styles))
+
+    deck = tmp_path / "deck"
+    (deck / "specs").mkdir(parents=True)
+    deck_json = deck / "deck.json"
+    deck_json.write_text(
+        '{"template":"","fonts":{"fullwidth":"","halfwidth":""},"defaultTextColor":""}',
+        encoding="utf-8",
+    )
+
+    result = apply_style(deck, "custom")
+    metadata = __import__("json").loads(deck_json.read_text(encoding="utf-8"))
+
+    assert result["updated"] == {"defaultTextColor": "#123456", "slideSize": {}}
+    assert metadata["defaultTextColor"] == "#123456"
+    assert metadata["fonts"] == {"fullwidth": "", "halfwidth": ""}
+    assert metadata["slideSize"] == {}
+    assert (deck / "specs" / "art-direction.html").exists()
+
+
+def test_apply_style_with_template_fills_empty_analysis_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import sdpm.engine.analyzer
+    from sdpm.api import apply_style
+
+    styles = tmp_path / "styles"
+    styles.mkdir()
+    (styles / "custom.html").write_text(
+        "<style>:root { --color-text: #FFFFFF; }</style>",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SDPM_STYLES_DIR", str(styles))
+    monkeypatch.setattr(
+        sdpm.engine.analyzer,
+        "analyze_template",
+        lambda _path: {
+            "fonts": {"fullwidth": "Analyzed JP", "halfwidth": "Analyzed Latin"},
+            "slide_size": {"width": 1920, "height": 1080, "ptPerPx": 0.5},
+        },
+    )
+
+    deck = tmp_path / "deck"
+    (deck / "specs").mkdir(parents=True)
+    (deck / "template.pptx").write_bytes(b"test placeholder")
+    deck_json = deck / "deck.json"
+    deck_json.write_text(
+        json.dumps(
+            {
+                "template": "template.pptx",
+                "fonts": {"fullwidth": "Existing JP", "halfwidth": ""},
+                "defaultTextColor": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_style(deck, "custom")
+    metadata = json.loads(deck_json.read_text(encoding="utf-8"))
+
+    assert result["updated"] == {
+        "defaultTextColor": "#FFFFFF",
+        "fonts": {"fullwidth": "Existing JP", "halfwidth": "Analyzed Latin"},
+        "slideSize": {"width": 1920, "height": 1080, "ptPerPx": 0.5},
+    }
+    assert metadata["fonts"]["fullwidth"] == "Existing JP"
+
+
+@pytest.mark.parametrize("template", ["selected", "selected.pptx"])
+def test_tools_apply_style_persists_template_and_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template: str,
+) -> None:
+    import json
+
+    import sdpm.engine.analyzer
+    from sdpm.tools import apply_style
+
+    styles = tmp_path / "styles"
+    templates = tmp_path / "templates"
+    styles.mkdir()
+    templates.mkdir()
+    (styles / "custom.html").write_text(
+        "<style>:root { --color-text: #ABCDEF; }</style>",
+        encoding="utf-8",
+    )
+    (templates / "selected.pptx").write_bytes(b"test placeholder")
+    monkeypatch.setenv("SDPM_STYLES_DIR", str(styles))
+    monkeypatch.setenv("SDPM_TEMPLATES_DIR", str(templates))
+    monkeypatch.setattr(
+        sdpm.engine.analyzer,
+        "analyze_template",
+        lambda _path: {
+            "fonts": {"fullwidth": "Analyzed JP", "halfwidth": "Analyzed Latin"},
+            "slide_size": {"width": 1920, "height": 1080, "ptPerPx": 0.5},
+        },
+    )
+
+    deck = tmp_path / "deck"
+    (deck / "specs").mkdir(parents=True)
+    deck_json = deck / "deck.json"
+    deck_json.write_text(
+        json.dumps(
+            {
+                "template": "",
+                "fonts": {"fullwidth": "", "halfwidth": ""},
+                "defaultTextColor": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_style(str(deck), "custom", template)
+    metadata = json.loads(deck_json.read_text(encoding="utf-8"))
+
+    assert result["updated"]["template"] == template
+    assert metadata["template"] == template
+    assert metadata["defaultTextColor"] == "#ABCDEF"
+    assert metadata["fonts"] == {
+        "fullwidth": "Analyzed JP",
+        "halfwidth": "Analyzed Latin",
+    }
+    assert metadata["slideSize"] == {
+        "width": 1920,
+        "height": 1080,
+        "ptPerPx": 0.5,
+    }
+
+
+def test_missing_deck_fields_flags_unfilled_text_color() -> None:
+    from sdpm.api import merge_style_metadata, missing_deck_fields
+
+    deck = {"template": "blank-dark", "fonts": {"halfwidth": "", "fullwidth": ""}, "defaultTextColor": ""}
+    analysis = {"fonts": {"halfwidth": "Latin", "fullwidth": "JP"}, "slide_size": {"width": 1920, "height": 1080}}
+    themed = {**analysis, "theme_colors": {"text": "#FFFFFF"}}
+    dual = "<style>:root { --dark-text: #FFF; --light-text: #000; }</style>"
+    single = "<style>:root { --color-text: #123456; }</style>"
+    assert missing_deck_fields(merge_style_metadata(dual, analysis, deck)) == ["defaultTextColor"]
+    assert merge_style_metadata(dual, themed, deck)["defaultTextColor"] == "#FFFFFF"
+    assert merge_style_metadata(single, themed, deck)["defaultTextColor"] == "#123456"
+    assert missing_deck_fields(merge_style_metadata(single, analysis, deck)) == []
+    assert missing_deck_fields({}) == ["template", "fonts", "defaultTextColor", "slideSize"]

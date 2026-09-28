@@ -27,6 +27,8 @@ import { ToolCard, ToolCardCompact } from "./ToolCard"
 import { HearingCard } from "./HearingCard"
 import { SnippetBlock } from "./SnippetBlock"
 import { batchGetSlidePreviewUrls } from "@/services/deckService"
+import { SLASH_TOKEN_SOURCE } from "@/lib/slashToken"
+import { useTranslations } from "next-intl"
 
 type HearingQuestion = { id: string; type: "single_select" | "multi_select" | "free_text"; text: string; options?: string[]; recommended?: string | string[]; placeholder?: string }
 
@@ -37,7 +39,7 @@ function extractQuestions(input: Record<string, unknown>): HearingQuestion[] {
     .filter(Boolean) as HearingQuestion[]
 }
 
-const MENTION_RE = /(@Page\s\d+|@\[[^\]]+\])/g
+const MENTION_RE = new RegExp(`(@Page\\s\\d+|@\\[[^\\]]+\\]|${SLASH_TOKEN_SOURCE})`)
 const SLIDE_PREVIEW_RE = /\[slide-preview:([a-f0-9]+):([a-z0-9][a-z0-9_-]*)\]/g
 const COLOR_CODE_RE = /(#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3}))\b/g
 
@@ -66,8 +68,8 @@ function renderInlinePreviews(text: string, urls: Record<string, string>): strin
  * @returns Array of string and JSX elements with mentions/colors highlighted
  */
 function highlightMentions(text: string): (string | React.JSX.Element)[] {
-  // Combined regex: mentions OR hex color codes
-  const COMBINED_RE = /(@Page\s\d+|@\[[^\]]+\]|#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b)/g
+  // Combined regex: mentions OR slash-picker tokens OR hex color codes
+  const COMBINED_RE = new RegExp(`(@Page\\s\\d+|@\\[[^\\]]+\\]|${SLASH_TOKEN_SOURCE}|#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\\b)`, "g")
   const parts = text.split(COMBINED_RE)
   return parts.map((part, i) => {
     if (MENTION_RE.test(part)) {
@@ -155,8 +157,6 @@ interface ChatMessageProps {
   isStreaming?: boolean
   /** Cognito ID token for fetching slide previews. */
   idToken?: string
-  /** Current deck slide IDs — forwarded to ToolCard/ComposeCard for slug existence. */
-  deckSlugs?: string[]
   /** Session ID — forwarded to ComposeCard for soft-stop calls. */
   sessionId?: string
   /** Cognito Access Token — forwarded to ComposeCard for soft-stop (client_id claim lives on the access token). */
@@ -167,7 +167,8 @@ interface ChatMessageProps {
   hearingDisabled?: boolean
 }
 
-export function ChatMessage({ role, content, toolUses = [], blocks, snippets = [], attachments = [], isStreaming = false, idToken, deckSlugs, sessionId, accessToken, onSend, hearingDisabled = false }: ChatMessageProps) {
+export function ChatMessage({ role, content, toolUses = [], blocks, snippets = [], attachments = [], isStreaming = false, idToken, sessionId, accessToken, onSend, hearingDisabled = false }: ChatMessageProps) {
+  const t = useTranslations("chat")
   const isUser = role === "user"
   const [expanded, setExpanded] = useState(false)
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({})
@@ -186,6 +187,12 @@ export function ChatMessage({ role, content, toolUses = [], blocks, snippets = [
   // Strip compact v1 attachment markers from display text
   cleanContent = cleanContent.replace(/\[Attached:\s*[^\]]+\]\n*/g, "").trim()
   const allSnippets = [...inlineSnippets, ...snippets]
+  const outlineDiff = cleanContent.match(/^([^\n]+)\n\n```diff\n([\s\S]*?)\n```([\s\S]*)$/)
+  const isOutlineEdit = cleanContent.startsWith("📝") ||
+    cleanContent.startsWith("I manually edited outline.md.") ||
+    cleanContent.startsWith("I made substantial edits to outline.md") ||
+    cleanContent.startsWith("outline.md を手動で編集しました。") ||
+    cleanContent.startsWith("outline.md を大幅に編集しました")
 
   // Fetch preview URLs for [slide-preview:deckId:slug] markers
   useEffect(() => {
@@ -255,7 +262,26 @@ export function ChatMessage({ role, content, toolUses = [], blocks, snippets = [
                 ))}
               </div>
             )}
-            <span className="whitespace-pre-wrap">{MENTION_RE.test(cleanContent) ? highlightMentions(cleanContent) : cleanContent}</span>
+            {isOutlineEdit ? (
+              <div className="outline-chat-message">
+                <div className="flex items-center gap-2 font-medium">
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-brand-teal/10 text-brand-teal" aria-hidden="true">
+                    <FileTextIcon className="h-3.5 w-3.5" />
+                  </span>
+                  <span>{outlineDiff?.[1] ?? cleanContent}</span>
+                  <span className="sr-only">{t("outlineEditLabel")}</span>
+                </div>
+                {outlineDiff && (
+                  <details className="mt-2 border-t border-brand-teal/15 pt-2">
+                    <summary className="cursor-pointer select-none text-xs text-foreground-muted hover:text-foreground">{t("outlineDiffDetails")}</summary>
+                    <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-background/50 p-2.5 text-xs leading-relaxed"><code>{outlineDiff[2]}</code></pre>
+                    {outlineDiff[3].trim() && <p className="mt-2 whitespace-pre-wrap text-xs text-foreground-secondary">{outlineDiff[3].trim()}</p>}
+                  </details>
+                )}
+              </div>
+            ) : (
+              <span className="whitespace-pre-wrap">{MENTION_RE.test(cleanContent) ? highlightMentions(cleanContent) : cleanContent}</span>
+            )}
           </div>
         ) : hasBlocks ? (
           /* Assistant: inline blocks layout */
@@ -281,7 +307,6 @@ export function ChatMessage({ role, content, toolUses = [], blocks, snippets = [
                   result={block.tool.result}
                   isActive={isStreaming && !block.tool.status && (i === blocks.length - 1 || (block.tool.streamMessages?.length ?? 0) > 0)}
                   streamMessages={block.tool.streamMessages}
-                  deckSlugs={deckSlugs}
                   sessionId={sessionId}
                   idToken={idToken}
                   accessToken={accessToken}
@@ -334,7 +359,6 @@ export function ChatMessage({ role, content, toolUses = [], blocks, snippets = [
                     result={latestTool.result}
                     isActive={isStreaming && !latestTool.status}
                     streamMessages={latestTool.streamMessages}
-                    deckSlugs={deckSlugs}
                     sessionId={sessionId}
                     idToken={idToken}
                     accessToken={accessToken}

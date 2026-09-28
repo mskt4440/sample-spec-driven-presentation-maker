@@ -14,14 +14,18 @@ Usage:
 
 import sys
 from pathlib import Path
+from typing import Annotated
 
-# Add sdpm/ (skill root) to sys.path so sdpm package is importable
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+from pydantic import Field
+
+# Prefer checkout sources only when this file is running from the repository.
+# Installed wheels resolve sdpm and shared from their normal site-packages paths.
+_HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parents[1]
 _SKILL_DIR = _REPO_ROOT / "sdpm"
-sys.path.insert(0, str(_SKILL_DIR))
-
-# Add project root to sys.path so shared/ package is importable
-sys.path.insert(0, str(_REPO_ROOT))
+if (_SKILL_DIR / "sdpm" / "config.py").is_file():
+    sys.path.insert(0, str(_SKILL_DIR))
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import os  # noqa: E402
 import sandbox_tools  # noqa: E402
@@ -38,8 +42,15 @@ _DECK_ROOT = Path(os.environ.get("SDPM_DECK_ROOT", Path.home() / "Documents" / "
 _RAW_ATTACHMENT_ROOT = _DECK_ROOT / ".attachments"
 
 
-def read_attachment(source: str, offset: int = 0, limit: int = 10240) -> dict:
-    """Read an ACP attachment; local paths must come from the raw attachment home."""
+def read_attachment(
+    source: Annotated[str, Field(description="Absolute path under the attachment home, or https:// URL.")],
+    offset: Annotated[int, Field(description="UTF-8 byte offset into the text to start from.")] = 0,
+    limit: Annotated[int, Field(description="Max bytes returned, 512–10240.")] = 10240,
+) -> dict:
+    """Read a user-supplied file or URL as paged, line-numbered text — PDF, DOCX, XLSX, PPTX,
+    text, CSV, HTML, JSON — or image metadata. Pure read, nothing is stored.
+    Formats and paging: read_guides(["attachments"]).
+    """
     if classify_source(source) == "local_path":
         try:
             validate_local_source(source, allow_any_path=False, root=_RAW_ATTACHMENT_ROOT)
@@ -48,8 +59,16 @@ def read_attachment(source: str, offset: int = 0, limit: int = 10240) -> dict:
     return _read_attachment(source=source, offset=offset, limit=limit)
 
 
-def import_attachment(source: str, deck_id: str, filename: str = "") -> dict:
-    """Import into an ACP deck while keeping raw sources and decks under DECK_ROOT."""
+def import_attachment(
+    source: Annotated[str, Field(description="Absolute path under the attachment home, or https:// URL.")],
+    deck_id: Annotated[str, Field(description="Deck directory path.")],
+    filename: Annotated[str, Field(description="Filename override; defaults to the source's name.")] = "",
+) -> dict:
+    """Import a file or URL into the deck's attachments/ so slides can use it: images
+    (converted to PNG), PDF/DOCX/XLSX (text + images), PPTX (full deck structure), URLs.
+    Idempotent per source. On IMPORT_INCOMPLETE call again with the same arguments.
+    Bundle layout: read_guides(["attachments"]).
+    """
     try:
         deck_path = Path(deck_id).resolve(strict=True)
         deck_path.relative_to(_DECK_ROOT)
@@ -69,22 +88,27 @@ mcp = FastMCP("sdpm-acp")
 # Common tools (1-line registration)
 # ---------------------------------------------------------------------------
 
-mcp.tool()(tools.init_presentation)
+mcp.tool()(tools.start_presentation)
+mcp.tool()(tools.start_composing)
+mcp.tool()(tools.start_style)
+mcp.tool()(tools.start_translation)
+mcp.tool()(tools.init_deck_workspace)
+mcp.tool()(tools.check_specs)
 mcp.tool()(tools.analyze_template)
 mcp.tool()(tools.generate_pptx)
 mcp.tool()(tools.search_assets)
 mcp.tool()(tools.list_templates)
 mcp.tool()(tools.list_styles)
 mcp.tool()(tools.apply_style)
-mcp.tool()(tools.read_examples)
-mcp.tool()(tools.list_workflows)
-mcp.tool()(tools.read_workflows)
-mcp.tool()(tools.list_guides)
 mcp.tool()(tools.read_guides)
 mcp.tool()(tools.code_to_slide)
 mcp.tool()(tools.grid)
 mcp.tool()(tools.arch_diagram)
-mcp.tool()(tools.diff_pptx)
+
+# User-invoked entry points (slash commands / prompt menu): vibe, spec, style, translate
+from sdpm.tools import prompts as _prompts  # noqa: E402
+
+_prompts.register(mcp)
 
 # Attachment tools (stateless pipeline)
 mcp.tool()(read_attachment)
@@ -99,48 +123,33 @@ mcp.tool()(sandbox_tools.run_style_python)
 # ---------------------------------------------------------------------------
 
 
+_Q_DESC = (
+    'Question object: {"type": "single_select" | "multi_select" | "free_text", "text": str, '
+    '"options": [str] (select types), "recommended": str | [str] (optional), '
+    '"placeholder": str (free_text, optional)}.'
+)
+_Q = Annotated[dict | None, Field(description="Next question; same shape as q0.")]
+
+
 @mcp.tool()
 def hearing(
-    inference: str,
-    q0: dict,
-    q1: dict | None = None,
-    q2: dict | None = None,
-    q3: dict | None = None,
-    q4: dict | None = None,
+    inference: Annotated[str, Field(description="Your reasoning or hypothesis, shown above the questions.")],
+    q0: Annotated[dict, Field(description=_Q_DESC)],
+    q1: _Q = None,
+    q2: _Q = None,
+    q3: _Q = None,
+    q4: _Q = None,
 ) -> str:
-    """Present structured questions to the user via a rich UI card.
-
-    ALWAYS use this tool when you need the user to make a choice or
-    judgment — not just for initial interviews but also for mid-workflow
-    decisions, confirmations with options, and next-step selections.
-    Only skip this tool for simple yes/no confirmations.
-
-    Always include your reasoning or hypothesis in the inference field
-    to help the user think — never ask blank questions.
-    Limit to 5 questions per call. If you need more, call again after
-    the user responds.
-
-    Args:
-        inference: Your reasoning or hypothesis to share with the user.
-            This is displayed prominently above the questions to provide
-            context and stimulate the user's thinking.
-        q0: First question object with keys:
-            - type (str): "single_select", "multi_select", or "free_text"
-            - text (str): The question text
-            - options (list[str], optional): Choices for select types
-            - recommended (str or list[str], optional): Suggested choice(s)
-            - placeholder (str, optional): Hint text for free_text type
-        q1: Second question (optional, same schema as q0).
-        q2: Third question (optional, same schema as q0).
-        q3: Fourth question (optional, same schema as q0).
-        q4: Fifth question (optional, same schema as q0).
-
-    Returns:
-        Confirmation that the questions were displayed. Wait for the
-        user's response in the next message.
+    """Show the user a card of up to five structured questions; the answers arrive in the
+    user's next message. For more than five, call again after the reply.
     """
     return "Questions displayed to user. Wait for their response."
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run the ACP-specific MCP server over stdio."""
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

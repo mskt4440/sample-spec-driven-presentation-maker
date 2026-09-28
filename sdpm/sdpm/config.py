@@ -23,9 +23,6 @@ REFERENCES_DIR = SKILL_ROOT / "references"
 TEMPLATES_DIR = SKILL_ROOT / "templates"
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
 CACHE_DIR = SKILL_ROOT / ".cache"
-# Canonical persona definitions (mode behaviors served via start_presentation).
-# Lives at the repo root, one level above the skill root.
-PERSONAS_DIR = SKILL_ROOT.parent / "personas"
 
 _DEFAULTS = {
     "output_dir": "~/Documents/SDPM-Presentations",
@@ -49,6 +46,11 @@ def get_user_config_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return base / "sdpm"
+
+
+def assets_install_dir() -> Path:
+    """Writable base directory for downloaded asset catalogs (the checkout's assets/)."""
+    return ASSETS_DIR
 
 
 def _get_resource_dirs(env_var: Optional[str], subdir: str, bundled: Path) -> list[Path]:

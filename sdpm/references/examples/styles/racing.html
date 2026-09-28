@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>racing — A high-velocity dark presentation style for audiences who must scan claims quickly; its purpose is to sustain momentum, its design decision limits emphasis to one red element, and its signature look combines italic condensed headlines, a blue-violet-red top stripe, open mechanical lanes, and angled icon frames.</title>
+<style>
+:root {
+  --color-text:#FFFFFF; /* claims and primary evidence */
+  --color-bg:#0B0B0D; /* near-black ground on every slide */
+  --color-surface:#17171C; /* quiet fields behind grouped evidence */
+  --color-border:#3A3A42; /* rules, tracks, and neutral chart marks */
+  --color-muted:#B9BCC4; /* upright support, qualifiers, and labels */
+  --accent:#E2001A; /* one decisive content signal per slide */
+  --accent-2:#1C69D4; /* left third of the identity stripe only */
+  --accent-3:#6E2C91; /* middle third of the identity stripe only */
+  --color-on-accent:#FFFFFF; /* readable copy when red is filled */
+  --font-family:Impact,"Arial Narrow","Helvetica Neue",Arial,"Hiragino Sans","Yu Gothic",Meiryo,sans-serif; /* condensed italic headlines and figures */
+  --fs-cover-title:62pt; /* cover or divider name, two lines maximum */
+  --fs-slide-title:42pt; /* verb-led assertion, five words maximum */
+  --fs-heading:25pt; /* short lane or sector headline */
+  --fs-body:20pt; /* upright evidence and explanations */
+  --fs-caption:16pt; /* direct units and short qualifiers */
+  --fs-label:13pt; /* upright uppercase metadata */
+  --fs-metric:64pt; /* one lead figure */
+  --fs-metric-sm:42pt; /* supporting or paired figure */
+  --margin-x:120px; /* safe inset beyond five percent */
+  --content-w:1680px; /* usable width between side margins */
+  --content-top:300px; /* content begins below title reserve */
+  --title-h:210px; /* two-line title band from y 70 */
+  --stripe-h:10px; /* fixed three-colour identity stripe */
+  --border-thin:1px; /* quiet evidence separators */
+  --border-strong:3px; /* selected lane and component rule */
+  --radius:0; /* every surface stays square */
+  --shadow:0 0 36px rgba(226,0,26,.45); /* local halo points to the selected member */
+}
+* { box-sizing:border-box; }
+body { margin:0; padding:40px; background:#050506; font-family:var(--font-family); zoom: 0.7; }
+.speed-line { background:var(--color-muted); }
+.slide { position:relative; width:1920px; height:1080px; margin:0 auto 40px; overflow:hidden; background:var(--color-bg); color:var(--color-text); }
+.el { position:absolute; }
+.icon { width:64px; height:64px; display:block; flex:0 0 64px; fill:var(--color-text); }
+.icon-frame { width:112px; height:112px; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,rgba(255,255,255,.14),rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.42); clip-path:polygon(0 0,100% 0,84% 100%,0 100%); box-shadow:0 0 20px rgba(255,255,255,.12); }
+.icon-frame.hot,.selected .icon-frame,.active .icon-frame,.diagram-node.active .icon-frame { border-color:var(--accent); box-shadow:var(--shadow); }
+.lane>.icon-frame,.sector>.icon-frame { margin-bottom:22px; }
+.selected .icon,.active .icon,.diagram-node.active .icon,.icon.hot { fill:var(--accent); }
+.tricolor { background:linear-gradient(90deg,var(--accent-2) 0 33.333%,var(--accent-3) 33.333% 66.666%,var(--accent) 66.666%); }
+.t-cover,.t-title,.t-heading { font-style:italic; font-weight:900; text-transform:uppercase; letter-spacing:-.6pt; }
+.t-cover { font-size:calc(var(--fs-cover-title) * 1.5); line-height:.96; }
+.t-title { font-size:calc(var(--fs-slide-title) * 1.5); line-height:1; }
+.t-heading { font-size:calc(var(--fs-heading) * 1.5); line-height:1.05; }
+.t-body,.t-caption,.t-label,.table-row { font-family:"Helvetica Neue",Arial,"Hiragino Sans","Yu Gothic",Meiryo,sans-serif; font-style:normal; }
+.t-body { font-size:calc(var(--fs-body) * 1.5); line-height:1.45; }
+.t-caption { font-size:calc(var(--fs-caption) * 1.5); line-height:1.4; color:var(--color-muted); }
+.t-label { font-size:calc(var(--fs-label) * 1.5); font-weight:700; line-height:1.2; letter-spacing:1.5pt; text-transform:uppercase; }
+.t-metric,.t-metric-sm { font-weight:900; font-style:normal; line-height:.9; }
+.t-metric { font-size:calc(var(--fs-metric) * 1.5); }
+.t-metric-sm { font-size:calc(var(--fs-metric-sm) * 1.5); }
+.muted { color:var(--color-muted); }
+.accent { color:var(--accent); text-shadow:0 0 16px rgba(226,0,26,.42); }
+.rule { background:var(--color-border); }
+.frame-title { overflow:hidden; }
+.frame-title .kicker { margin-bottom:14px; color:var(--color-muted); }
+.next { border-top:var(--border-thin) solid var(--color-border); padding-top:12px; color:var(--color-muted); }
+.next b { color:var(--color-text); }
+.lane { border-top:var(--border-strong) solid var(--color-border); padding:24px 24px 0 0; }
+.lane.selected { border-top-color:var(--accent); box-shadow:0 -14px 30px rgba(226,0,26,.12); }
+.marker { display:flex; align-items:center; justify-content:center; border:var(--border-thin) solid var(--color-border); font-size:calc(var(--fs-label) * 1.5); font-family:"Helvetica Neue",Arial,sans-serif; font-weight:700; }
+.marker.hot { border-color:var(--accent); color:var(--accent); }
+.takeaway { border-top:var(--border-thin) solid var(--color-border); padding-top:18px; }
+.metric-block { border-left:var(--border-strong) solid var(--color-border); padding-left:28px; }
+.metric-block.hot { border-left-color:var(--accent); box-shadow:-14px 0 34px rgba(226,0,26,.14); }
+.metric-block.lead .t-metric { margin:18px 0 28px; }
+.track { display:flex; }
+.track .sector { flex:1; border-top:var(--border-strong) solid var(--color-border); padding:24px 22px 0 0; }
+.track .sector.active { border-top-color:var(--accent); }
+.tag { display:flex; align-items:center; justify-content:center; border:var(--border-thin) solid var(--color-border); color:var(--color-muted); }
+.table-wrap { border-top:var(--border-strong) solid var(--color-text); }
+.table-row { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; align-items:center; border-bottom:var(--border-thin) solid var(--color-border); }
+.table-row > span { padding:0 18px; }
+.table-head { font-size:calc(var(--fs-label) * 1.5); font-weight:700; letter-spacing:1.2pt; text-transform:uppercase; }
+.table-body { font-size:calc(var(--fs-caption) * 1.5); color:var(--color-muted); }
+.chart-specimen { border-bottom:var(--border-thin) solid var(--color-border); }
+.node { display:flex; align-items:center; justify-content:center; border:var(--border-thin) solid var(--color-border); text-align:center; }
+.node.hot { border:var(--border-strong) solid var(--accent); }
+.connector,.cycle-connector { background:var(--color-border); }
+.illustration-row { display:flex; align-items:center; gap:32px; border-top:var(--border-strong) solid var(--color-border); padding:30px 0 0; }
+.diagram-node { display:flex; align-items:center; gap:30px; border:var(--border-strong) solid var(--color-border); padding:36px; background:var(--color-surface); }
+.diagram-node.active { border-color:var(--accent); box-shadow:var(--shadow); }
+.cycle-caption { display:flex; align-items:center; justify-content:center; text-align:center; color:var(--color-muted); }
+.arrow-right,.arrow-left,.arrow-up,.arrow-down { background:var(--color-muted); }
+.arrow-right { clip-path:polygon(0 0,100% 50%,0 100%); }
+.arrow-left { clip-path:polygon(100% 0,0 50%,100% 100%); }
+.arrow-up { clip-path:polygon(0 100%,50% 0,100% 100%); }
+.arrow-down { clip-path:polygon(0 0,50% 100%,100% 0); }
+.state { border-top:var(--border-strong) solid var(--color-border); padding-top:24px; }
+.state.after { border-top-color:var(--accent); box-shadow:0 -14px 30px rgba(226,0,26,.12); }
+.prose { border-top:var(--border-strong) solid var(--color-border); padding-top:26px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="material/search" viewBox="0 -960 960 960"><path d="M796-121 533-384q-30 26-70 40.5T378-329q-108 0-183-75t-75-181q0-106 75-181t182-75q106 0 180.5 75T632-585q0 43-14 83t-42 75l264 262-44 44ZM377-389q81 0 138-57.5T572-585q0-81-57-138.5T377-781q-82 0-139.5 57.5T180-585q0 81 57.5 138.5T377-389Z"/></symbol><symbol id="material/monitoring" viewBox="0 -960 960 960"><path d="M120-120v-76l60-60v136h-60Zm165 0v-236l60-60v296h-60Zm165 0v-296l60 61v235h-60Zm165 0v-235l60-60v295h-60Zm165 0v-396l60-60v456h-60ZM120-356v-85l280-278 160 160 280-281v85L560-474 400-634 120-356Z"/></symbol><symbol id="material/science" viewBox="0 -960 960 960"><path d="M172-120q-41.78 0-59.39-39T124-230l248-280v-270h-52q-12.75 0-21.37-8.68-8.63-8.67-8.63-21.5 0-12.82 8.63-21.32 8.62-8.5 21.37-8.5h320q12.75 0 21.38 8.68 8.62 8.67 8.62 21.5 0 12.82-8.62 21.32-8.63 8.5-21.38 8.5h-52v270l248 280q29 32 11.39 71T788-120H172Zm-12-60h640L528-488v-292h-96v292L160-180Zm318-300Z"/></symbol><symbol id="material/flag" viewBox="0 -960 960 960"><path d="M200-120v-680h343l19 86h238v370H544l-18.93-85H260v309h-60Zm300-452Zm95 168h145v-250H511l-19-86H260v251h316l19 85Z"/></symbol></svg>
+
+<!-- Part: Cover -->
+<!-- The cover spends red on the result phrase; the fixed identity stripe and condensed headline set the racing tone. Three flat speed lines run from the end of the red phrase to the right margin, each shorter than the one above, and carry the headline forward so the cover reads as motion; they are cover-only, neutral, square-ended rectangles with no glow or blur, so red stays on the phrase. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el t-label muted" style="left:120px;top:250px;width:1000px;height:35px">Bundled style / pole position</div>
+<div class="el t-cover" style="left:120px;top:290px;width:1480px;height:260px">Racing<br><span class="accent">sets the pace</span></div>
+<div class="el speed-line" style="left:900px;top:456px;width:900px;height:4px"></div>
+<div class="el speed-line" style="left:1040px;top:486px;width:760px;height:4px"></div>
+<div class="el speed-line" style="left:1180px;top:516px;width:620px;height:4px"></div>
+<div class="el t-body muted" style="left:120px;top:680px;width:1040px;height:125px">Short claims launch hard. Upright evidence holds the line. One red signal marks the decisive element.</div>
+<div class="el t-label next" style="left:120px;top:965px;width:1680px;height:55px"><b>Start grid</b> — state the first claim</div>
+</div>
+
+<!-- Part: Rules -->
+<!-- Frame: content — build one 10px stripe from three adjacent rectangles at x 0–640, 640–1280, and 1280–1920; reserve y 70–280 for a two-line title, start content at y 300 or below, keep 120px side margins, and use an unfilled optional next-lap footer. -->
+<!-- Every slide uses 0° rotation and square mechanical geometry. Condensed italic headlines create motion; aligned lanes and straight tracks keep evidence controlled, and a local red rule, frame, or figure points to the one decision-relevant member. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Rules / design decision</div><div class="t-title">Control the velocity</div></div>
+<div class="el t-body muted" style="left:120px;top:300px;width:1520px;height:100px">Slanted headlines create pace; upright evidence preserves control.</div>
+<!-- Component: container (.lane) — group peer evidence as open square lanes, never cards; may vary: two to four equal lanes and copy; may not: round or use unequal peer geometry because mechanical alignment carries the comparison. -->
+<div class="el lane" style="left:120px;top:455px;width:780px;height:380px"><div class="t-label muted">Hold the line</div><div class="t-heading">Keep one claim</div><div class="t-body">Use five title words or fewer. Reserve both title lines and never shrink to fit.</div></div>
+<!-- Component: selected (.selected, .active, .hot) — point to the one decision-relevant member with a red rule, frame, glyph, or figure and a local halo; may vary: selected lane, sector, node, state, or metric; may not: activate another member or change peer geometry. -->
+<div class="el lane selected" style="left:1020px;top:455px;width:780px;height:380px"><div class="t-label muted">Decisive lane</div><div class="t-heading">Spend red once</div><div class="t-body">Beyond the fixed stripe, mark one word, value, bar, rule, node, or state.</div></div>
+<div class="el t-label next" style="left:120px;top:965px;width:1680px;height:55px"><b>Next lap</b> — remove visual drag</div>
+</div>
+
+<!-- Contrast remains at least 4.5:1, or 3:1 for type at least 18 point. Blue and violet stay adjacent to red only in the stripe and never become categories. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Rules / restraint</div><div class="t-title">Keep motion disciplined</div></div>
+<!-- Component: numbered (.marker) — index a short rule or finding beside equal-width copy; may vary: number and statement; may not: become a filled badge or break alignment. -->
+<div class="el marker" style="left:120px;top:340px;width:72px;height:48px">01</div>
+<div class="el t-body" style="left:225px;top:332px;width:620px;height:75px">Keep 5% margins.</div>
+<div class="el marker" style="left:120px;top:475px;width:72px;height:48px">02</div>
+<div class="el t-body" style="left:225px;top:467px;width:620px;height:75px">Keep evidence upright.</div>
+<div class="el marker hot" style="left:980px;top:340px;width:72px;height:48px">03</div>
+<div class="el t-body" style="left:1085px;top:332px;width:650px;height:75px">Direct labels. No empty grids.</div>
+<div class="el marker" style="left:980px;top:475px;width:72px;height:48px">04</div>
+<div class="el t-body" style="left:1085px;top:467px;width:650px;height:75px">Use only distinguishing colour.</div>
+<div class="el rule" style="left:120px;top:630px;width:1680px;height:1px"></div>
+<div class="el t-heading" style="left:120px;top:690px;width:1680px;height:90px">No yellow. No emoji. Keep geometry square.</div>
+<div class="el t-caption" style="left:120px;top:820px;width:1500px;height:80px">Headline italics may be synthesised; body, tables, chart labels, and captions remain upright.</div>
+</div>
+
+<!-- Pace depends on instant recognition: frame one Material icon per concept as a sharp instrument-panel signal, always paired with a short label. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Rules / illustration</div><div class="t-title">Draw only useful signals</div></div>
+<div class="el t-body muted" style="left:120px;top:295px;width:1680px;height:120px">Use one framed 64px icon in each lane, sector, or node. Keep frames white; mark only the active member’s frame and glyph red. Favor straight tracks and four-node cycles.</div>
+<!-- Component: icon (.icon, .icon-frame) — identify concepts at lane heads, process sectors, and diagram nodes; size: 64px on a 112px angled instrument frame; colour: white, with red frame and glyph pointing to the active member; family: Material; the frame groups glyph with its label and sets the mechanical tone; may vary: glyph, short label, and active state; may not: mix families, appear without a label, become round, or mark two peers active. -->
+<div class="el illustration-row" style="left:120px;top:500px;width:480px;height:220px"><span class="icon-frame"><svg class="icon"><use href="#material/search"/></svg></span><div><div class="t-label muted">Open lane</div><div class="t-heading">Find the claim</div></div></div>
+<div class="el illustration-row" style="left:720px;top:500px;width:480px;height:220px"><span class="icon-frame"><svg class="icon"><use href="#material/monitoring"/></svg></span><div><div class="t-label muted">Process sector</div><div class="t-heading">Read the pace</div></div></div>
+<div class="el illustration-row" style="left:1320px;top:500px;width:480px;height:220px"><span class="icon-frame hot"><svg class="icon hot"><use href="#material/flag"/></svg></span><div><div class="t-label muted">Active node</div><div class="t-heading">Mark one gate</div></div></div>
+<div class="el takeaway t-heading" style="left:120px;top:845px;width:1680px;height:100px">Four nodes and one loop are enough.</div>
+</div>
+
+<!-- Part: Message & Outline -->
+<!-- Density: 60 -->
+<!-- The 60-word ceiling tightens the older two-block prose limit of 90 words. Add a slide before adding a sixth title word, a second claim, or smaller type. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Message / title grammar</div><div class="t-title">Build forward momentum</div></div>
+<div class="el t-body muted" style="left:120px;top:300px;width:1520px;height:100px">Use a short, verb-led assertion. Topic labels stall because they ask readers to find the claim.</div>
+<div class="el metric-block hot" style="left:120px;top:470px;width:620px;height:260px"><div class="t-label muted">Maximum visible words</div><div class="t-metric accent">60</div></div>
+<div class="el lane" style="left:860px;top:470px;width:940px;height:260px"><div class="t-label muted">Slide contract</div><div class="t-heading">One dominant visual</div><div class="t-body">Use 25–60 words. End with the advancing action or question.</div></div>
+<!-- Component: takeaway (.takeaway) — state one advancing consequence or hand-off; may vary: one sentence; may not: restate the title, use a filled footer, or add another claim. -->
+<div class="el takeaway t-heading" style="left:860px;top:800px;width:940px;height:110px">Add slides before adding words.</div>
+</div>
+
+<!-- Deck length follows the brief and material. There is no fixed chapter shape; use dividers only when navigation helps, and never repeat one composition three times in succession. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Outline / cadence</div><div class="t-title">Sequence claims to decisions</div></div>
+<div class="el track" style="left:120px;top:360px;width:1680px;height:310px"><div class="sector"><div class="t-label muted">01 / Launch</div><div class="t-heading">Strongest claim</div><div class="t-caption">Open without throat-clearing.</div></div><div class="sector"><div class="t-label muted">02 / Hold</div><div class="t-heading">Evidence forms</div><div class="t-caption">Alternate icon-led process, four-node cycle, metric, comparison, native chart, and table.</div></div><div class="sector active"><div class="t-label muted">03 / Exit</div><div class="t-heading">Recommendation</div><div class="t-caption">Name the advancing action.</div></div><div class="sector"><div class="t-label muted">04 / Finish</div><div class="t-heading">Resolved ask</div><div class="t-caption">No recap grid.</div></div></div>
+<div class="el takeaway t-heading" style="left:120px;top:790px;width:1680px;height:110px">Let cadence serve the argument.</div>
+</div>
+
+<!-- Part: Patterns -->
+<!-- Frame: divider — keep the stripe, place a muted chapter index around y 320, the section name around y 480, and one preview below a neutral rule; never add evidence, another red signal, or a footer. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el t-metric-sm muted" style="left:120px;top:320px;width:600px;height:100px">04 / 05</div>
+<div class="el t-cover" style="left:120px;top:480px;width:1400px;height:180px">Patterns at race pace</div>
+<div class="el rule" style="left:120px;top:730px;width:1680px;height:1px"></div>
+<div class="el t-heading muted" style="left:120px;top:775px;width:1680px;height:120px">Each layout keeps one claim, one dominant form, and one red signal.</div>
+</div>
+
+<!-- Pattern: comparison — for: choosing between two matched options or states; regions: left, right, takeaway; components: container ×2 + selected + takeaway; may vary: lane ratio from 50:50 to 40:60 and evidence; may not: change criteria order, scale, period, alignment, or density. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / comparison</div><div class="t-title">Match lanes before choosing</div></div>
+<div class="el lane" style="left:120px;top:350px;width:780px;height:430px"><div class="t-label muted">Lane A</div><div class="t-heading">Hold equal criteria</div><div class="t-body">Same measure<br>Same period<br>Same reading order</div></div>
+<div class="el lane selected" style="left:1020px;top:350px;width:780px;height:430px"><div class="t-label muted">Lane B / selected</div><div class="t-heading">Mark one difference</div><div class="t-body">Same measure<br>Same period<br>Same reading order</div></div>
+<div class="el takeaway t-heading" style="left:120px;top:855px;width:1680px;height:100px">Equal geometry makes the verdict credible.</div>
+</div>
+
+<!-- Pattern: columns — for: two to four parallel factors; regions: col-1, col-2, col-3, takeaway; components: container ×3 + numbered + selected + takeaway; may vary: two open lanes at 40:60–50:50, or three to four equal lanes with one active lane; may not: vary peer rhythm or comparable measures within the chosen variant. -->
+<!-- Four-column versions allow one heading, one value, and one sentence per lane; open bottoms prevent a dashboard look. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / columns</div><div class="t-title">Scan equal race factors</div></div>
+<div class="el lane" style="left:120px;top:360px;width:528px;height:430px"><span class="icon-frame"><svg class="icon"><use href="#material/search"/></svg></span><div class="t-label muted">01 / Context</div><div class="t-heading">Frame the change</div><div class="t-metric-sm">24</div><div class="t-caption">One direct sentence.</div></div>
+<div class="el lane" style="left:696px;top:360px;width:528px;height:430px"><span class="icon-frame"><svg class="icon"><use href="#material/monitoring"/></svg></span><div class="t-label muted">02 / Evidence</div><div class="t-heading">Hold the measure</div><div class="t-metric-sm">38</div><div class="t-caption">One direct sentence.</div></div>
+<div class="el lane selected" style="left:1272px;top:360px;width:528px;height:430px"><span class="icon-frame"><svg class="icon"><use href="#material/flag"/></svg></span><div class="t-label muted">03 / Decision</div><div class="t-heading">Mark the factor</div><div class="t-metric-sm">51</div><div class="t-caption">One direct sentence.</div></div>
+<div class="el takeaway t-heading" style="left:120px;top:860px;width:1680px;height:100px">Equal lanes keep scanning honest.</div>
+</div>
+
+<!-- Pattern: process — for: three to five ordered sectors with one active gate; regions: tag, step-1, step-2, step-3, step-4, takeaway; components: tag + step ×4 + connector + selected + takeaway; may vary: sector count and active gate; may not: curve, rotate, detach links, add arrows, or activate two sectors. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / process</div><div class="t-title">Complete the next sector</div></div>
+<!-- Component: tag (.tag) — identify a compact status or category without becoming the red signal; may vary: wording; may not: replace the assertion or compete with selection. -->
+<div class="el tag t-label" style="left:120px;top:310px;width:330px;height:48px">Four-sector lap</div>
+<!-- Component: step (.sector) — hold one verb-led stage and one completion condition; may vary: three to five stages; may not: curve, rotate, change peer size, or activate two. -->
+<!-- Component: connector (.track, .cycle-connector) — join stages with attached neutral tracks; may vary: one shared sequence rail or four orthogonal cycle edges; may not: hide endpoints, curve links, rotate, or add arrows where direction is irrelevant. -->
+<div class="el track" style="left:120px;top:420px;width:1680px;height:320px"><div class="sector"><span class="icon-frame"><svg class="icon"><use href="#material/search"/></svg></span><div class="t-label muted">01</div><div class="t-heading">Define</div><div class="t-caption">Scope fixed</div></div><div class="sector"><span class="icon-frame"><svg class="icon"><use href="#material/monitoring"/></svg></span><div class="t-label muted">02</div><div class="t-heading">Measure</div><div class="t-caption">Baseline labelled</div></div><div class="sector"><span class="icon-frame"><svg class="icon"><use href="#material/science"/></svg></span><div class="t-label muted">03</div><div class="t-heading">Test</div><div class="t-caption">Result bounded</div></div><div class="sector active"><span class="icon-frame"><svg class="icon"><use href="#material/flag"/></svg></span><div class="t-label muted">04</div><div class="t-heading">Release</div><div class="t-caption">Gate passed</div></div></div>
+<div class="el takeaway t-heading" style="left:120px;top:840px;width:1680px;height:110px">Each sector hands off one completed output.</div>
+</div>
+
+<!-- Pattern: metric — for: one lead measure with up to two supports; regions: body, kpi-1, kpi-2, takeaway; components: metric ×3 + selected + takeaway; may vary: values and units; may not: exceed three measures, omit direct labels, or mark more than one figure red. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / metric</div><div class="t-title">Raise the lead metric</div></div>
+<!-- Component: metric (.metric-block) — pair a figure with its label, unit, and comparator; may vary: one lead plus two supports; may not: exceed three figures or leave a figure unqualified. -->
+<div class="el metric-block hot lead" style="left:120px;top:350px;width:900px;height:420px"><div class="t-label muted">Primary measure</div><div class="t-metric accent">42%</div><div class="t-body">Lead outcome, directly labelled.</div></div>
+<div class="el metric-block" style="left:1180px;top:380px;width:620px;height:170px"><div class="t-label muted">Support A</div><div class="t-metric-sm">18 days</div></div>
+<div class="el metric-block" style="left:1180px;top:630px;width:620px;height:170px"><div class="t-label muted">Support B</div><div class="t-metric-sm">7.4 pts</div></div>
+<div class="el t-label next" style="left:120px;top:965px;width:1680px;height:55px"><b>Next lap</b> — test the comparison</div>
+</div>
+
+<!-- Pattern: table — for: exact comparable records with one exception; regions: table, takeaway; components: table + selected + takeaway; may vary: up to five body rows and values; may not: change four columns, add zebra fills or vertical rules, or mark a second exception. -->
+<!-- Native tables inherit the template font; figures remain upright and direct. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / table</div><div class="t-title">Find the one outlier</div></div>
+<!-- Component: table (.table-wrap) — present exact records with four columns, horizontal rules, and one red exception; may vary: values and up to five rows; may not: add zebra fill, vertical rules, or another red cell. -->
+<div class="el table-wrap" style="left:120px;top:340px;width:1680px;height:460px"><div class="table-row table-head" style="height:70px"><span>Lane</span><span>Measure</span><span>Condition</span><span>Gate</span></div><div class="table-row table-body" style="height:90px"><span>Primary</span><span>18 units</span><span>Stable</span><span>A</span></div><div class="table-row table-body" style="height:90px"><span>Decisive</span><span class="accent">31 units</span><span>Review</span><span>B</span></div><div class="table-row table-body" style="height:90px"><span>Support</span><span>24 units</span><span>Stable</span><span>C</span></div></div>
+<div class="el takeaway t-heading" style="left:120px;top:860px;width:1680px;height:100px">Rules reveal the exception without card chrome.</div>
+</div>
+
+<!-- Pattern: chart — for: one-series trend across three to eight marks; regions: chart, takeaway; components: chart + selected + takeaway; may vary: native chart type, periods, and illustrative values; may not: use shape-built production charts, avoidable legends, empty gridlines, a second series, or another red mark. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / chart</div><div class="t-title">Accelerate each period</div></div>
+<div class="el t-caption" style="left:120px;top:300px;width:900px;height:50px">Decks use native charts; HTML values are illustrative.</div>
+<!-- Component: chart (.chart-specimen) — build a native one-series chart with upright direct labels, one red final mark, a common baseline, and no empty gridlines; may vary: three to eight marks and chart type; may not: use shapes for production data. -->
+<div class="el chart-specimen" style="left:240px;top:380px;width:1440px;height:460px"><svg viewBox="0 0 1440 460" width="1440" height="460"><rect x="120" y="280" width="180" height="178" fill="#3A3A42"/><rect x="450" y="220" width="180" height="238" fill="#3A3A42"/><rect x="780" y="150" width="180" height="308" fill="#3A3A42"/><rect x="1110" y="60" width="180" height="398" fill="#E2001A"/><g fill="#B9BCC4" font-family="Arial" font-size="28"><text x="180" y="260">12</text><text x="510" y="200">18</text><text x="840" y="130">26</text><text x="1170" y="40" fill="#FFFFFF">34</text><text x="180" y="445">P1</text><text x="510" y="445">P2</text><text x="840" y="445">P3</text><text x="1170" y="445">P4</text></g></svg></div>
+<div class="el takeaway t-heading" style="left:240px;top:885px;width:1440px;height:90px">Direct labels keep the trend moving.</div>
+</div>
+
+<!-- Pattern: diagram — for: a four-stage feedback cycle whose direction matters; regions: step-1, step-2, step-3, step-4, takeaway; components: container ×4 + icon ×4 + connector ×4 + selected + takeaway; may vary: labels and one active node; may not: exceed four nodes, hide connector endpoints, add a second loop, curve links, or mark another node red. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / diagram</div><div class="t-title">Run one control loop</div></div>
+<div class="el cycle-connector" style="left:620px;top:438px;width:680px;height:3px"></div>
+<div class="el arrow-right" style="left:1268px;top:426px;width:32px;height:28px"></div>
+<div class="el cycle-connector" style="left:1518px;top:530px;width:3px;height:190px"></div>
+<div class="el arrow-down" style="left:1506px;top:688px;width:28px;height:32px"></div>
+<div class="el cycle-connector" style="left:620px;top:808px;width:680px;height:3px"></div>
+<div class="el arrow-left" style="left:620px;top:796px;width:32px;height:28px"></div>
+<div class="el cycle-connector" style="left:398px;top:530px;width:3px;height:190px"></div>
+<div class="el arrow-up" style="left:386px;top:530px;width:28px;height:32px"></div>
+<div class="el diagram-node" style="left:180px;top:350px;width:440px;height:180px"><span class="icon-frame"><svg class="icon"><use href="#material/search"/></svg></span><div><div class="t-label muted">01 / Observe</div><div class="t-heading">Find the signal</div></div></div>
+<div class="el diagram-node" style="left:1300px;top:350px;width:440px;height:180px"><span class="icon-frame"><svg class="icon"><use href="#material/monitoring"/></svg></span><div><div class="t-label muted">02 / Measure</div><div class="t-heading">Read the pace</div></div></div>
+<div class="el diagram-node" style="left:1300px;top:720px;width:440px;height:180px"><span class="icon-frame"><svg class="icon"><use href="#material/science"/></svg></span><div><div class="t-label muted">03 / Test</div><div class="t-heading">Prove the move</div></div></div>
+<div class="el diagram-node active" style="left:180px;top:720px;width:440px;height:180px"><span class="icon-frame"><svg class="icon"><use href="#material/flag"/></svg></span><div><div class="t-label muted">04 / Release</div><div class="t-heading">Pass one gate</div></div></div>
+<div class="el cycle-caption t-heading" style="left:720px;top:570px;width:480px;height:110px">Output returns<br>as input</div>
+</div>
+
+<!-- Pattern: before-after — for: one matched state change; regions: left, right, takeaway; components: before-after ×2 + selected + metric + takeaway; may vary: labels and evidence; may not: change units, period, scale, order, or alignment, or place red on the before state. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / before and after</div><div class="t-title">Shift into control</div></div>
+<!-- Component: before-after (.state) — compare two aligned states with identical units, period, scale, and row order; may vary: values and labels; may not: add an arrow or mark the before state. -->
+<div class="el state" style="left:120px;top:360px;width:780px;height:430px"><div class="t-label muted">Before / baseline</div><div class="t-heading">Fragmented state</div><div class="t-metric-sm">18 units</div><div class="t-caption">Same period and scale</div></div>
+<div class="el state after" style="left:1020px;top:360px;width:780px;height:430px"><div class="t-label muted">After / selected</div><div class="t-heading">Controlled state</div><div class="t-metric-sm">34 units</div><div class="t-caption">Same period and scale</div></div>
+<div class="el takeaway t-heading" style="left:120px;top:850px;width:1680px;height:100px">Matched geometry exposes the change.</div>
+</div>
+
+<!-- Pattern: text — for: a bounded argument needing prose; regions: left, right, takeaway; components: lead ×2 + takeaway; may vary: one or two upright blocks; may not: exceed 60 visible words, use nested bullets, italicise evidence, or add a third block. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el frame-title" style="left:120px;top:70px;width:1680px;height:210px"><div class="t-label kicker">Pattern / text</div><div class="t-title">Read the race notes</div></div>
+<!-- Component: lead (.prose) — hold one of at most two upright evidence blocks; may vary: paragraph length within density; may not: use nested bullets, italic body, a third block, or decorative fill. -->
+<div class="el prose" style="left:120px;top:370px;width:780px;height:380px"><div class="t-label muted">Observation</div><div class="t-body">State one observed condition in complete sentences. Keep the field open and the evidence upright.</div></div>
+<div class="el prose" style="left:1020px;top:370px;width:780px;height:380px"><div class="t-label muted">Implication</div><div class="t-body">State one bounded consequence. Split the slide before the prose becomes a second claim.</div></div>
+<div class="el takeaway t-heading" style="left:120px;top:850px;width:1680px;height:100px">Close prose with one advancing action.</div>
+</div>
+
+<!-- Part: Closing -->
+<!-- Frame: closing — keep the stripe, place one resolved ask around y 380, divide it from at most two upright conditions with a neutral rule, and end without a recap grid or following appendix. -->
+<div class="slide">
+<div class="el tricolor" style="left:0px;top:0px;width:1920px;height:10px"></div>
+<div class="el t-label muted" style="left:120px;top:300px;width:800px;height:32px">The finish</div>
+<div class="el t-cover" style="left:120px;top:380px;width:1560px;height:200px">Approve the <span class="accent">next step</span></div>
+<div class="el rule" style="left:120px;top:650px;width:1680px;height:1px"></div>
+<div class="el t-body" style="left:120px;top:705px;width:780px;height:180px"><b>Owner and boundary.</b><br>State who moves first.</div>
+<div class="el t-body" style="left:1020px;top:705px;width:780px;height:180px"><b>Measure and review.</b><br>State how progress returns.</div>
+</div>
+
+</body>
+</html>

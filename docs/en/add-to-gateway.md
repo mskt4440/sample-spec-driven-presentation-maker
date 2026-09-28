@@ -146,7 +146,6 @@ GENU_RUNTIME_DIR=<path-to-genu>/packages/cdk/lambda-python/generic-agent-core-ru
 
 cp -r <path-to-sdpm>/sdpm $GENU_RUNTIME_DIR/sdpm-skill
 cp -r <path-to-sdpm>/servers/local $GENU_RUNTIME_DIR/sdpm-servers-local
-cp -r <path-to-sdpm>/personas $GENU_RUNTIME_DIR/sdpm-personas
 ```
 
 ### Step 2: Patch the Dockerfile
@@ -157,7 +156,6 @@ Add the following lines to `$GENU_RUNTIME_DIR/Dockerfile`, **before** the `EXPOS
 # --- SDPM: spec-driven-presentation-maker ---
 COPY sdpm-skill/ ./sdpm-skill/
 COPY sdpm-servers-local/ ./sdpm-servers-local/
-COPY sdpm-personas/ ./personas/
 RUN uv pip install --python /tmp/.venv/bin/python ./sdpm-skill
 RUN /tmp/.venv/bin/python sdpm-skill/scripts/download_aws_icons.py \
  && /tmp/.venv/bin/python sdpm-skill/scripts/download_material_icons.py
@@ -165,7 +163,8 @@ RUN ln -s /var/task/sdpm-skill /var/task/sdpm
 ```
 
 `SDPM_SKILL_ROOT=/var/task/sdpm-skill` (set in Step 3) anchors the engine's
-bundled-data lookups (references, templates, and `../personas`).
+bundled-data lookups (`references/` — including `references/workflows/`, the
+role documents — and `templates/`).
 
 ### Step 3: Register the MCP server
 
@@ -203,7 +202,7 @@ In GenU's AgentBuilder UI:
 You are a presentation design assistant. Use the spec-driven-presentation-maker MCP tools to create PowerPoint slides.
 
 Key rules:
-- Always call read_workflows first to load the workflow before making any design decisions.
+- Always call start_presentation first — it returns the workflow to follow — before making any design decisions.
 - When writing the presentation JSON, use the write_file tool to write to /tmp/ws/. Do NOT use Code Interpreter — its sandbox is isolated from MCP tools.
 - Large JSON must be split to avoid timeouts. Write each slide as a separate file (e.g. /tmp/ws/part1.json, /tmp/ws/part2.json), then use concat_files to join them into the final /tmp/ws/presentation.json.
 - Example split strategy:

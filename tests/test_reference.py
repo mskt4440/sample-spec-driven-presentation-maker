@@ -3,7 +3,7 @@
 """Tests for the shared tool contract (sdpm.tools) reference access
 and the remote-specific style listing (tools.reference)."""
 
-import pytest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from sdpm import tools as contract
@@ -13,57 +13,57 @@ from tools.reference import list_styles as remote_list_styles
 class TestContractReference:
     """Contract reference tools read bundled data from the local filesystem."""
 
-    def test_list_workflows(self):
-        result = contract.list_workflows()
-        names = [i["name"] for i in result["items"]]
-        assert "create-new-1-briefing" in names
+    def test_workflow_readers_are_gone(self):
+        # Role documents arrive through the start_* entry tools; the spec is a guide.
+        assert not hasattr(contract, "read_workflows")
+        assert not hasattr(contract, "list_workflows")
 
-    def test_read_workflows(self):
-        result = contract.read_workflows(["create-new-1-briefing"])
+    def test_guide_catalogue_rides_in_read_guides_description(self):
+        assert not hasattr(contract, "list_guides")
+        doc = contract.read_guides.__doc__
+        for name in ("design-rules", "hand-edit-sync", "slide-json-spec", "grid", "attachments"):
+            assert name in doc
+
+    def test_read_slide_spec_as_guide(self):
+        result = contract.read_guides(["slide-json-spec"])
         assert len(result["documents"]) == 1
-        assert result["documents"][0]["content"]
-
-    def test_list_guides(self):
-        result = contract.list_guides()
-        names = [i["name"] for i in result["items"]]
-        assert "design-rules" in names
+        assert "deck.json" in result["documents"][0]["content"]
 
     def test_read_guides(self):
-        result = contract.read_guides(["design-rules"])
+        result = contract.read_guides(["hand-edit-sync"])
         assert len(result["documents"]) == 1
         assert result["documents"][0]["content"]
 
-    def test_read_examples_rejects_missing(self):
-        with pytest.raises(FileNotFoundError, match="not found"):
-            contract.read_examples(["nonexistent-doc-xyz"])
+    def test_read_examples_is_gone(self):
+        # components/all and patterns were retired; styles are reached via
+        # list_styles / apply_style, not a generic example reader.
+        assert not hasattr(contract, "read_examples")
 
-    def test_start_presentation_returns_instructions(self):
-        text = contract.start_presentation()
-        assert "read_workflows" in text
-        assert "create-new-1-briefing" in text
 
-    @pytest.mark.parametrize("mode,needle", [
-        ("vibe", "Vibe Workflow"),
-        ("spec", "Phase 1 Flow"),
-        ("style", "run_style_python"),
-        ("composer", "assigned slugs"),
-        ("single", "Workflow: New Presentation"),
-    ])
-    def test_start_presentation_modes(self, mode, needle):
-        text = contract.start_presentation(mode=mode)
-        assert needle in text
+def test_reference_vocabulary_is_environment_neutral():
+    """Role/fact docs use contract vocabulary, apart from documented CLI setup."""
+    references = Path(__file__).parents[1] / "sdpm" / "references"
+    roots = [references / name for name in ("workflows", "guides")]
+    allowed_cli = {
+        references / "guides" / "setup.md",
+        references / "guides" / "arch-layout-engine.md",
+        references / "guides" / "hand-edit-sync.md",  # diff runs from the checkout (CLI-only)
+    }
+    banned = ("pptx_builder.py", "uv run", "read_workflows", "init_presentation")
 
-    def test_every_persona_file_is_served(self):
-        # personas/*.md and _MODES must stay in sync (a persona no one can
-        # request is dead content; a mode without a file raises at runtime)
-        from sdpm.config import PERSONAS_DIR
-        files = {p.stem for p in PERSONAS_DIR.glob("*.md")}
-        assert files == set(contract._MODES)
+    offenders = []
+    for base in roots:
+        for path in base.glob("*.md"):
+            if path in allowed_cli:
+                continue
+            found = [token for token in banned if token in path.read_text(encoding="utf-8")]
+            if found:
+                offenders.append((str(path.relative_to(references)), found))
+    assert not offenders
 
-    def test_start_presentation_unknown_mode(self):
-        text = contract.start_presentation(mode="bogus")
-        assert "Unknown mode" in text
-        assert "vibe" in text
+    arch = (references / "guides" / "arch-layout-engine.md").read_text(encoding="utf-8")
+    assert arch.count("pptx_builder.py") == 1
+    assert "start_presentation" not in arch
 
 
 class TestRemoteListStyles:
@@ -90,3 +90,17 @@ class TestRemoteListStyles:
         assert len(user) == 1
         assert user[0]["name"] == "my-style"
         assert user[0]["description"] == "My Style"
+
+    def test_pinned_filter_reports_hidden_builtin_names(self):
+        storage = MagicMock()
+        storage.pptx_bucket = "bucket"
+        storage.list_files.return_value = []
+        all_builtin = remote_list_styles(storage=storage, user_id="", include_all=True)["styles"]
+        assert len(all_builtin) >= 2
+        pinned, *others = [s["name"] for s in all_builtin]
+        storage.get_style_pins.return_value = [pinned]
+
+        result = remote_list_styles(storage=storage, user_id="u1", include_all=False)
+        assert [s["name"] for s in result["styles"]] == [pinned]
+        assert result["other_styles"] == others
+        assert "hint" in result

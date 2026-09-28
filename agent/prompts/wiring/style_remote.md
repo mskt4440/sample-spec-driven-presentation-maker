@@ -1,3 +1,9 @@
+## Inputs (this environment)
+
+`start_style` was not called here — its `styles` and `base` are not in your context.
+Use `list_styles()` for the catalogue and read a bundled style's HTML through
+`run_style_python` with `ref_styles` (below) to get the skeleton to imitate.
+
 ## run_style_python — sandbox I/O (this environment)
 
 In this environment, `run_style_python` does NOT inject `read_style` /
@@ -8,7 +14,7 @@ Workspace layout:
 - `ref/{name}.html` — reference styles (read-only; loaded via the `ref_styles` parameter)
 
 Usage patterns:
-- Read a reference: `run_style_python(code="html = open('ref/corporate-executive.html').read(); print(html[:500])", ref_styles=["corporate-executive"])`
+- Read a reference: `run_style_python(code="html = open('ref/report.html').read(); print(html[:500])", ref_styles=["report"])`
 - Create/edit the style: `run_style_python(code="open('style.html','w').write(html)", style_name="style-20260506-1430")`
 - Read back for incremental edits: `run_style_python(code="print(open('style.html').read())", style_name="style-20260506-1430")`
 

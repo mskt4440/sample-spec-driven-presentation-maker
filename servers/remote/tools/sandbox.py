@@ -23,6 +23,8 @@ from typing import Any
 
 import boto3
 
+from boto_config import LONG_CALL, SHORT_API
+
 from storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -106,11 +108,13 @@ def execute_in_sandbox(
         Tuple of (output, outline_warnings, lint_diagnostics, changed paths).
     """
 
-    client = boto3.client("bedrock-agentcore", region_name=region)
+    client = boto3.client("bedrock-agentcore", region_name=region, config=SHORT_API)
+    # User code may run for minutes and must not be retried — separate client.
+    exec_client = boto3.client("bedrock-agentcore", region_name=region, config=LONG_CALL)
 
     session = client.start_code_interpreter_session(
         codeInterpreterIdentifier="aws.codeinterpreter.v1",
-        name=f"pptx-{deck_id or 'calc'}",
+        name=f"pptx-{deck_id}",
         sessionTimeoutSeconds=300,
     )
     session_id = session["sessionId"]
@@ -129,7 +133,7 @@ def execute_in_sandbox(
 
         # Execute user code (prefixed with helper import so agents can use
         # read_json / write_json / ... without an explicit import).
-        response = client.invoke_code_interpreter(
+        response = exec_client.invoke_code_interpreter(
             codeInterpreterIdentifier="aws.codeinterpreter.v1",
             sessionId=session_id,
             name="executeCode",

@@ -4,7 +4,7 @@
  * ChatInput — Reusable chat input area with textarea, Send/Stop, PlusMenu, attachments.
  *
  * Extracted from ChatPanel.tsx. Handles:
- * - Textarea with auto-resize and IME-safe composition
+ * - Textarea that grows with its content (react-textarea-autosize, 1–5 rows) and IME-safe composition
  * - Send/Stop button toggle
  * - PlusMenu (file attach + snippet)
  * - AttachmentPreview + SnippetInput
@@ -16,9 +16,12 @@
 
 "use client"
 
-import { useRef, useState, useCallback, useEffect, forwardRef, useImperativeHandle, FormEvent, KeyboardEvent, ReactNode } from "react"
+import { useRef, useState, useCallback, useEffect, useId, forwardRef, useImperativeHandle, FormEvent, KeyboardEvent, ReactNode } from "react"
+import TextareaAutosize from "react-textarea-autosize"
 import { useCompositionSafe } from "@/hooks/useCompositionSafe"
 import { useIsMobile } from "@/hooks/UseMobile"
+import { useSlashPicker } from "@/hooks/useSlashPicker"
+import type { PickerItem, TokenMatch } from "@/lib/slashToken"
 import { uploadFile, validateFile, canAddMoreFiles, UploadedFile } from "@/services/uploadService"
 import { PlusMenu } from "./PlusMenu"
 import { AttachmentPreview, Attachment, SnippetAttachment } from "./AttachmentPreview"
@@ -27,6 +30,8 @@ import { SnippetInput } from "./SnippetInput"
 import { Send, Square } from "lucide-react"
 import { toast } from "sonner"
 import { useTranslations } from "next-intl"
+import { SlashPickerPopup, slashOptionId } from "./SlashPickerPopup"
+import { SlashTokenReflection } from "./SlashTokenReflection"
 
 export interface ChatInputProps {
   /** Called with the final message text, uploaded files, snippets, and attachment metadata. */
@@ -43,6 +48,10 @@ export interface ChatInputProps {
   deckId?: string
   /** Slot for additional UI above the textarea row (e.g., Options panel, @mentions overlay). */
   children?: ReactNode
+  /** Opens the Local-only kiro session picker. */
+  onContinueFromSession?: () => void
+  /** Disabled once this chat already has messages. */
+  continueFromSessionDisabled?: boolean
   /** Stop button tooltip override. */
   stopTitle?: string
   /** Called on every input change (e.g., for @mention detection). */
@@ -51,6 +60,13 @@ export interface ChatInputProps {
   textareaOverlay?: ReactNode
   /** Additional className for the textarea element (e.g., text-transparent for overlay mode). */
   textareaClassName?: string
+  /** Template/style candidates. Omit to disable the slash picker. */
+  slashItems?: PickerItem[]
+  slashLoading?: boolean
+  /** Called when a slash fragment opens, to lazily ensure candidates are loaded. */
+  onSlashOpen?: () => void
+  /** Called when the textarea receives focus, to prefetch slash candidates. */
+  onTextareaFocus?: () => void
 }
 
 export interface ChatInputHandle {
@@ -63,7 +79,7 @@ export interface ChatInputHandle {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
-  { onSend, isLoading, onStop, disabled, placeholder, idToken, sessionId, children, stopTitle, onInputChange, textareaOverlay, textareaClassName },
+  { onSend, isLoading, onStop, disabled, placeholder, idToken, sessionId, children, onContinueFromSession, continueFromSessionDisabled, stopTitle, onInputChange, textareaOverlay, textareaClassName, slashItems, slashLoading, onSlashOpen, onTextareaFocus },
   ref,
 ) {
   const t = useTranslations("chatInput")
@@ -72,9 +88,39 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const [snippetOpen, setSnippetOpen] = useState(false)
   const [snippets, setSnippets] = useState<SnippetAttachment[]>([])
   const [editingSnippetId, setEditingSnippetId] = useState<string | null>(null)
+  const [landed, setLanded] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const formRef = useRef<HTMLFormElement>(null)
+  const landedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const slashListboxId = `slash-listbox-${useId()}`
   const { onCompositionStart, onCompositionEnd, getIsComposing } = useCompositionSafe()
   const isMobile = useIsMobile()
+  const slashEnabled = slashItems !== undefined
+
+  const handleSlashInserted = useCallback(() => {
+    if (landedTimerRef.current) clearTimeout(landedTimerRef.current)
+    setLanded(true)
+    landedTimerRef.current = setTimeout(() => {
+      setLanded(false)
+      landedTimerRef.current = null
+    }, 400)
+  }, [])
+
+  const picker = useSlashPicker({
+    textareaRef,
+    value: input,
+    setValue: setInput,
+    items: slashItems ?? [],
+    onInserted: handleSlashInserted,
+  })
+
+  useEffect(() => () => {
+    if (landedTimerRef.current) clearTimeout(landedTimerRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (slashEnabled && picker.open) onSlashOpen?.()
+  }, [onSlashOpen, picker.open, slashEnabled])
 
   const handleFilesRef = useRef<(files: FileList) => void>(() => {})
 
@@ -86,10 +132,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       const end = ta.selectionEnd
       const before = input.slice(0, start)
       const after = input.slice(end)
-      setInput(before + text + after)
+      const next = before + text + after
+      const pos = start + text.length
+      setInput(next)
+      // Programmatic inserts bypass onChange, so feed the slash picker here too
+      // (e.g. the empty-state hint inserts "/" to open it).
+      if (slashEnabled) picker.onInputChange(next, pos)
       requestAnimationFrame(() => {
         ta.focus()
-        const pos = start + text.length
         ta.setSelectionRange(pos, pos)
       })
     },
@@ -101,16 +151,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       handleFilesRef.current(fakeList)
     },
     textareaRef,
-  }), [input])
-
-  // Auto-resize textarea
-  useEffect(() => {
-    const ta = textareaRef.current
-    if (ta) {
-      ta.style.height = "0px"
-      ta.style.height = ta.scrollHeight + "px"
-    }
-  }, [input])
+  }), [input, picker, slashEnabled])
 
   const handleFiles = useCallback((files: FileList) => {
     const currentCount = attachments.length
@@ -151,6 +192,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setSnippets((prev) => prev.filter((s) => s.id !== id))
   }, [])
 
+  const removeSlashToken = useCallback((match: TokenMatch) => {
+    const end = input[match.end] === " " ? match.end + 1 : match.end
+    const next = input.slice(0, match.start) + input.slice(end)
+    setInput(next)
+    onInputChange?.(next)
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(match.start, match.start)
+    })
+  }, [input, onInputChange])
+
   const handleSend = async () => {
     if ((!input.trim() && attachments.length === 0 && snippets.length === 0) || isLoading || disabled) return
 
@@ -186,6 +238,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
     onSend(input, uploadedFiles, sentSnippets, sentAttachments)
     setInput("")
+    picker.close()
     setAttachments([])
     setSnippets([])
     requestAnimationFrame(() => textareaRef.current?.focus())
@@ -225,7 +278,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         initialText={editingSnippetId ? snippets.find((s) => s.id === editingSnippetId)?.text : undefined}
       />
       <div className="flex-none px-3 pb-6 pt-2 safe-bottom">
-        <form onSubmit={handleSubmit} className="rounded-xl border border-border bg-background-raised search-glow">
+        <form
+          ref={formRef}
+          onSubmit={handleSubmit}
+          className="rounded-xl border border-border bg-background-raised search-glow"
+          data-landed={landed ? "" : undefined}
+        >
           <AttachmentPreview
             attachments={attachments}
             snippets={snippets}
@@ -234,27 +292,48 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             onEditSnippet={editSnippet}
           />
 
+          {slashEnabled && (
+            <SlashTokenReflection text={input} items={slashItems} onRemove={removeSlashToken} />
+          )}
+
           {children}
 
           <div className="flex items-end gap-2 px-2 py-2">
             <PlusMenu
               onFilesSelected={handleFiles}
               onSnippetRequest={handleSnippetRequest}
+              onContinueFromSession={onContinueFromSession}
+              continueFromSessionDisabled={continueFromSessionDisabled}
               disabled={isLoading}
             />
 
             <div className="flex-1 relative">
-              <textarea
+              <TextareaAutosize
                 ref={textareaRef}
+                minRows={1}
+                maxRows={5}
                 value={input}
-                onChange={(e) => { setInput(e.target.value); onInputChange?.(e.target.value) }}
-                onKeyDown={handleKeyDown}
+                onChange={(e) => {
+                  setInput(e.target.value)
+                  if (slashEnabled) picker.onInputChange(e.target.value, e.target.selectionStart)
+                  onInputChange?.(e.target.value)
+                }}
+                onKeyDown={(e) => {
+                  if (slashEnabled && picker.onKeyDown(e, getIsComposing(e))) return
+                  handleKeyDown(e)
+                }}
+                onSelect={slashEnabled ? picker.onSelectionChange : undefined}
+                onFocus={onTextareaFocus}
                 onCompositionStart={onCompositionStart}
                 onCompositionEnd={onCompositionEnd}
                 placeholder={placeholder ?? (isMobile ? t("placeholderMobile") : t("placeholderDesktop"))}
                 aria-label={t("inputLabel")}
-                className={`w-full bg-transparent resize-none text-sm min-h-[24px] max-h-[120px] py-1 pr-2 focus:outline-none placeholder:text-foreground-muted caret-foreground leading-relaxed font-[inherit] tracking-[inherit] ${textareaClassName ?? ""}`}
-                rows={1}
+                aria-expanded={slashEnabled ? picker.open : undefined}
+                aria-controls={slashEnabled ? slashListboxId : undefined}
+                aria-activedescendant={slashEnabled && picker.open && picker.filtered[picker.activeIndex]
+                  ? slashOptionId(slashListboxId, picker.activeIndex)
+                  : undefined}
+                className={`w-full bg-transparent resize-none text-sm py-1 pr-2 focus:outline-none placeholder:text-foreground-muted caret-foreground leading-relaxed font-[inherit] tracking-[inherit] ${textareaClassName ?? ""}`}
                 autoFocus
               />
               {textareaOverlay}
@@ -287,6 +366,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
         </form>
       </div>
+      {slashEnabled && (
+        <SlashPickerPopup
+          open={picker.open}
+          query={picker.query}
+          items={slashItems}
+          filtered={picker.filtered}
+          activeIndex={picker.activeIndex}
+          onActiveIndexChange={(index) => picker.setActiveIndex(index)}
+          onSelect={picker.select}
+          loading={slashLoading ?? false}
+          textareaRef={textareaRef}
+          anchorRef={formRef}
+          listboxId={slashListboxId}
+        />
+      )}
     </FileDropZone>
   )
 })

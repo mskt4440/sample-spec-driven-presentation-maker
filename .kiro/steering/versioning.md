@@ -5,7 +5,9 @@
 ## Engine Version
 - Single source of truth: `__version__` in `sdpm/sdpm/__init__.py`
 - `sdpm/pyproject.toml` uses dynamic version, auto-read from `__init__.py`
-- When changing version, edit `__init__.py` only
+- When changing version, edit `__init__.py` — **and `scripts/mcpb/manifest.json`**
+  (the Claude Desktop bundle carries its own copy). The plugin manifests that used to
+  hold further copies were removed with the plugin layer
 
 ## SemVer
 - MAJOR: Breaking changes to Engine API (e.g., existing JSON no longer works)

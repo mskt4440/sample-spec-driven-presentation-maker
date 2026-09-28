@@ -10,6 +10,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
+import { AnimatePresence, motion } from "motion/react"
 import { SlidePreview } from "@/services/deckService"
 import type { SpecFiles } from "@/services/deckService"
 import { Download, Layers, LayoutGrid, Rows3, FolderOpen } from "lucide-react"
@@ -18,11 +19,35 @@ import { SpecStepNav, SpecMarkdownPreview } from "@/components/deck/SpecStepNav"
 import type { SpecTab } from "@/components/deck/SpecStepNav"
 import { SlideThumbnail } from "@/components/deck/SlideThumbnail"
 import { AnimatedSlidePreview } from "@/components/deck/AnimatedSlidePreview"
+import { DeckDefs, type DeckDefsStatus } from "@/components/deck/DeckDefs"
+import { useFollowScroll } from "@/components/deck/useFollowScroll"
 import { IS_LOCAL } from "@/lib/mode"
 import { notifyError } from "@/lib/errors"
 import { useTranslations } from "next-intl"
 import { AGENT_WAIT_COLORS } from "@/components/deck/SpecWaiting"
 
+
+/**
+ * One slide card in either view. `layoutId` is shared across grid and full view
+ * so toggling the view (or clicking a thumbnail) morphs the card into place;
+ * `layout` lets neighbours slide when a slide is inserted or removed.
+ */
+const CARD_SPRING = { type: "spring", stiffness: 500, damping: 40, mass: 0.8 } as const
+function SlideCard({ slug, children, className }: { slug: string; children: React.ReactNode; className?: string }) {
+  return (
+    <motion.div
+      layout
+      layoutId={`slide-${slug}`}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.18 } }}
+      transition={{ layout: CARD_SPRING, opacity: { duration: 0.24 }, y: CARD_SPRING }}
+      className={className}
+    >
+      {children}
+    </motion.div>
+  )
+}
 
 interface SlideCarouselProps {
   slides: SlidePreview[]
@@ -46,8 +71,8 @@ interface SlideCarouselProps {
   workflowPhase?: string | null
   /** Callback when user selects a style inline. */
   onStyleSelect?: (name: string) => void
-  /** Callback when user selects a template inline (isChange = template already confirmed). */
-  onTemplateSelect?: (name: string, isChange: boolean) => void
+  /** Callback when user selects a template inline. */
+  onTemplateSelect?: (name: string) => void
   /** Confirmed template from deck.json (raw value, e.g. "corporate.pptx"). */
   currentTemplate?: string | null
   /** Cognito ID token for style API calls. */
@@ -69,7 +94,16 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
   }
   if (dupUrls.length) console.warn("[SlideCarousel] same composeUrl used for multiple slides:", dupUrls, urlBySlug)
   const { viewMode, setViewMode } = usePreferences()
-  const containerRef = useRef<HTMLDivElement>(null)
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null)
+  const followChangedSlide = useFollowScroll(scrollElement)
+  const [defsState, setDefsState] = useState<{ url: string; status: DeckDefsStatus }>({
+    url: defsUrl || "",
+    status: "loading",
+  })
+  const handleDefsStatus = useCallback((status: DeckDefsStatus) => {
+    setDefsState({ url: defsUrl || "", status })
+  }, [defsUrl])
+  const deckDefsReady = Boolean(defsUrl && defsState.url === defsUrl && defsState.status === "loaded")
 
   /* ── Aspect ratio reported by the first child (deck is uniform) ── */
   const [deckAr, setDeckAr] = useState(16 / 9)
@@ -83,46 +117,32 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
 
   /* ── Compose update detection → auto-scroll to changed slide ── */
   const prevComposeKeys = useRef<Map<string, string>>(new Map())
-  const scrollTargetRef = useRef<string | null | undefined>(undefined)
   const hadSlidesOnMount = useRef(slides.length > 0)
   const [firstComposeSeen, setFirstComposeSeen] = useState(false)
   const [knownComposeUrls, setKnownComposeUrls] = useState<Map<string, string>>(new Map())
 
   useEffect(() => {
-    let anyChanged = false
+    let latestChangedSlug: string | null = null
     for (const slide of slides) {
-      const key = slide.composeUrl?.split("?")[0] || ""
+      const key = slide.composeUrl || ""
       const prev = prevComposeKeys.current.get(slide.slug) || ""
-      if (key && prev && key !== prev) anyChanged = true
-      if (key && !prev && firstComposeSeen) anyChanged = true
+      if (key && prev && key !== prev) latestChangedSlug = slide.slug
+      if (key && !prev && firstComposeSeen) latestChangedSlug = slide.slug
       if (key) prevComposeKeys.current.set(slide.slug, key)
     }
     // Mark first compose seen (skip animation for existing decks)
     if (!firstComposeSeen && slides.some(s => s.composeUrl)) {
       if (hadSlidesOnMount.current) {
         // Existing deck: suppress animation for this first batch
-        anyChanged = false
+        latestChangedSlug = null
       }
       setFirstComposeSeen(true)
     }
-    if (anyChanged) scrollTargetRef.current = null // arm scroll for next onAnimate
+    if (latestChangedSlug) followChangedSlide(latestChangedSlug)
     setKnownComposeUrls(new Map(prevComposeKeys.current))
+  // firstComposeSeen intentionally describes the previous batch while this effect detects transitions.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slides])
-
-  const handleAnimate = useCallback((slug: string) => {
-    if (scrollTargetRef.current === null && containerRef.current) {
-      scrollTargetRef.current = slug
-      const el = containerRef.current.querySelector(`[data-slide-id="${slug}"]`)
-      if (el) {
-        const container = containerRef.current
-        const elRect = el.getBoundingClientRect()
-        const containerRect = container.getBoundingClientRect()
-        const offset = elRect.top - containerRect.top + container.scrollTop - 24
-        container.scrollTo({ top: offset, behavior: "smooth" })
-      }
-    }
-  }, [])
+  }, [slides, followChangedSlide])
 
   /* ── Slide update detection for glow highlight ── */
   const prevUrlKeys = useRef<Map<string, string>>(new Map())
@@ -151,7 +171,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
 
   /**
    * Auto-focus: when a spec file transitions from null to non-null,
-   * switch to that tab. Priority: brief → outline → artDirection.
+   * switch to that tab. Priority: brief → artDirection → outline (workflow order).
    * When slides appear (0 → 1+), switch to slides tab.
    */
   useEffect(() => {
@@ -159,7 +179,7 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     prevSpecsRef.current = specs
     if (!prev || !specs) return
 
-    const order: (keyof SpecFiles)[] = ["brief", "outline", "artDirection"]
+    const order: (keyof SpecFiles)[] = ["brief", "artDirection", "outline"]
     for (const key of order) {
       if (prev[key] == null && specs[key] != null) {
         setSpecTab(key)
@@ -184,17 +204,34 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     }
   }, [slides.length])
 
+  // Grid thumbnail click: switch to full view and land on that slide once the
+  // shared-layout morph has run.
+  const [focusSlug, setFocusSlug] = useState<string | null>(null)
+  const openSlideInFullView = useCallback((slug: string) => {
+    setFocusSlug(slug)
+    setViewMode("full")
+  }, [setViewMode])
+  useEffect(() => {
+    if (!focusSlug || viewMode !== "full" || !scrollElement) return
+    const el = scrollElement.querySelector(`[data-slide-id="${focusSlug}"]`)
+    const timer = setTimeout(() => {
+      el?.scrollIntoView({ behavior: "smooth", block: "center" })
+      setFocusSlug(null)
+    }, 420)
+    return () => clearTimeout(timer)
+  }, [focusSlug, viewMode, scrollElement])
+
   // Scroll to target slide when navigating from search results
   useEffect(() => {
-    if (!scrollToSlide || !containerRef.current) return
-    const el = containerRef.current.querySelector(`[data-slide-id="${scrollToSlide}"]`)
+    if (!scrollToSlide || !scrollElement) return
+    const el = scrollElement.querySelector(`[data-slide-id="${scrollToSlide}"]`)
     if (el) {
       setTimeout(() => {
         el.scrollIntoView({ behavior: "smooth", block: "center" })
         onScrollComplete?.()
       }, 300)
     }
-  }, [scrollToSlide, slidesWithPreview.length, onScrollComplete])
+  }, [scrollToSlide, slidesWithPreview.length, onScrollComplete, scrollElement])
 
   /** Local: open deck directory in Finder/Explorer */
   async function handleFolderOpen() {
@@ -328,43 +365,46 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
     if (slidesWithPreview.length === 0) return renderSlidesEmpty()
 
     return (
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-6 py-6">
+      <div ref={setScrollElement} data-slide-scroller className="flex-1 overflow-y-auto px-6 py-6">
         {viewMode === "grid" ? (
           <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
-            {slidesWithPreview.map((slide, i) => (
-              <SlideThumbnail
-                key={slide.slug}
-                src={slide.previewUrl}
-                alt={t("slideAltFull", { number: i + 1, total: slidesWithPreview.length }) + (deckName ? `: ${deckName}` : "")}
-                index={i}
-                slug={slide.slug}
-                onClick={() => onSlideClick?.(i + 1)}
-                updated={updatedIds.has(slide.slug)}
-                className="border border-border/40 hover:border-border-hover hover:-translate-y-[1px] hover:shadow-[0_4px_16px_oklch(0_0_0/30%)] transition-all duration-200 cursor-pointer group"
-              >
-
-                <span className="absolute bottom-1.5 right-2 text-[11px] font-medium text-white/30 group-hover:text-white/50 transition-colors">
-                  {i + 1}
-                </span>
-              </SlideThumbnail>
-            ))}
+            <AnimatePresence initial={false}>
+              {slidesWithPreview.map((slide, i) => (
+                <SlideCard key={slide.slug} slug={slide.slug}>
+                  <SlideThumbnail
+                    src={slide.previewUrl}
+                    alt={t("slideAltFull", { number: i + 1, total: slidesWithPreview.length }) + (deckName ? `: ${deckName}` : "")}
+                    index={i}
+                    slug={slide.slug}
+                    onClick={() => { openSlideInFullView(slide.slug); onSlideClick?.(i + 1) }}
+                    updated={updatedIds.has(slide.slug)}
+                    className="slide-cv border border-border/40 hover:border-border-hover hover:-translate-y-[1px] hover:shadow-[0_4px_16px_oklch(0_0_0/30%)] transition-all duration-200 cursor-pointer group"
+                  >
+                    <span className="absolute bottom-1.5 right-2 text-[11px] font-medium text-white/30 group-hover:text-white/50 transition-colors">
+                      {i + 1}
+                    </span>
+                  </SlideThumbnail>
+                </SlideCard>
+              ))}
+            </AnimatePresence>
           </div>
         ) : (
           /* Full view: cap height so one slide always fits the viewport
              (100vh minus header + paddings). Width follows aspect ratio. */
           <div className="mx-auto w-full space-y-4"
                style={{ maxWidth: `calc((100vh - 170px) * ${deckAr})` }}>
+          <AnimatePresence initial={false}>
           {slidesWithPreview.map((slide, i) => (
-            slide.composeUrl && defsUrl ? (
+            <SlideCard key={slide.slug} slug={slide.slug}>
+            {slide.composeUrl && defsUrl ? (
               <AnimatedSlidePreview
-                key={slide.slug}
                 defsUrl={defsUrl}
                 composeUrl={slide.composeUrl}
                 slug={slide.slug}
                 skipAnimation={hadSlidesOnMount.current && !firstComposeSeen}
                 knownUrl={hadSlidesOnMount.current ? (knownComposeUrls.get(slide.slug) || null) : null}
-                onAnimate={() => handleAnimate(slide.slug)}
                 onAspectRatio={handleAspectRatio}
+                defsMounted={deckDefsReady}
                 fallback={
                   <SlideThumbnail
                     src={slide.previewUrl}
@@ -373,13 +413,12 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                     slug={slide.slug}
                     onClick={() => onSlideClick?.(i + 1)}
                     onAspectRatio={handleAspectRatio}
-                    className="slide-shadow w-full cursor-pointer hover:ring-2 hover:ring-primary/50 transition-shadow"
+                    className="slide-cv slide-shadow w-full cursor-pointer hover:ring-2 hover:ring-primary/50 transition-shadow"
                   />
                 }
               />
             ) : (
               <SlideThumbnail
-                key={slide.slug}
                 src={slide.previewUrl}
                 alt={t("slideAltFull", { number: i + 1, total: slidesWithPreview.length }) + (deckName ? `: ${deckName}` : "")}
                 index={i}
@@ -387,10 +426,12 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
                 onClick={() => onSlideClick?.(i + 1)}
                 updated={updatedIds.has(slide.slug)}
                 onAspectRatio={handleAspectRatio}
-                className="slide-shadow w-full cursor-pointer hover:ring-2 hover:ring-primary/50 transition-shadow"
+                className="slide-cv slide-shadow w-full cursor-pointer hover:ring-2 hover:ring-primary/50 transition-shadow"
               />
-            )
+            )}
+            </SlideCard>
           ))}
+          </AnimatePresence>
           </div>
         )}
       </div>
@@ -399,6 +440,9 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
 
   return (
     <div className="h-full flex flex-col">
+      {defsUrl && viewMode === "full" && specTab === "slides" && (
+        <DeckDefs defsUrl={defsUrl} onStatusChange={handleDefsStatus} />
+      )}
       {/* Spec step navigation */}
       <SpecStepNav
         specs={specs}
@@ -487,7 +531,8 @@ export function SlideCarousel({ slides, defsUrl, deckId, deckName, pptxUrl, isLo
           onStyleSelect={specTab === "artDirection" ? onStyleSelect : undefined}
           onTemplateSelect={specTab === "artDirection" ? onTemplateSelect : undefined}
           currentTemplate={specTab === "artDirection" ? currentTemplate : undefined}
-          idToken={specTab === "artDirection" ? idToken : undefined}
+          idToken={idToken}
+          deckId={deckId}
           outlineExists={specTab === "brief" ? (specs?.outline != null) : undefined}
         />
       )}

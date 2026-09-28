@@ -42,17 +42,35 @@ npm run dev
 
 <a id="local-mode"></a>
 
-## 実験的機能: ローカルモード（Kiro ACP バックエンド）
+## ローカルモード（Kiro ACP バックエンド）
 
-> ⚠️ **実験段階の機能です。** API やフラグ、挙動は予告なく変更・破壊される可能性があります。
+**[Kiro](https://kiro.dev/) CLI** を [ACP](https://agentclientprotocol.com/)
+（Agent Client Protocol）経由のバックエンドとして使い、フル機能の Web UI をローカルで実行します。
+AWS へのデプロイは不要です。
 
-AWS にデプロイされた Agent / Runtime の代わりに、**[Kiro](https://kiro.dev/) CLI** を [ACP](https://agentclientprotocol.com/)（Agent Client Protocol）経由でバックエンドとして使用し、Web UI をすべてローカル環境で動かせます。Layer 3/4 をセットアップせずに Web UI を試したいときに便利です。
+### 導入と起動
 
-### 前提条件
+インストーラーは Kiro CLI などの依存関係を導入し、Web UI をビルドして（「What to install」で
+「Browser Web UI」を on のまま）、`sdpm` ランチャーとデスクトップショートカットを作成します。
 
-- `kiro-cli` がインストール済みで PATH に通っていること — [Kiro CLI インストールガイド](https://kiro.dev/docs/cli/install/)
+```bash
+curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-spec-driven-presentation-maker/main/scripts/install/dist/install.sh | bash
+sdpm webui
+```
 
-### 起動
+Windows 対応は CI でのみ検証済みです。
+
+```powershell
+irm https://raw.githubusercontent.com/aws-samples/sample-spec-driven-presentation-maker/main/scripts/install/dist/install.ps1 | iex
+sdpm webui
+```
+
+MCP のみで入れた場合は `sdpm update --with-webui` で後から Web UI を追加できます。
+
+### 開発者向けの手動起動
+
+[Kiro CLI インストールガイド](https://kiro.dev/docs/cli/install/)に従って `kiro-cli` を
+`PATH` に追加してから、次を実行します。
 
 ```bash
 cd web-ui
@@ -60,11 +78,11 @@ npm ci
 npm run dev:local
 ```
 
-[http://localhost:3000](http://localhost:3000) をブラウザで開く（3000 が使用中の場合は Next.js が自動で空きポートを選びます）。
+[http://localhost:3000](http://localhost:3000) をブラウザで開きます（3000 が使用中の場合は Next.js が自動で空きポートを選びます）。
 
 ### 動作の仕組み
 
-`NEXT_PUBLIC_MODE=local` が設定され、`src/app/api/` 以下の Next.js API Routes が有効化され、アクティブなデッキごとに `kiro-cli acp --agent sdpm-spec` を子プロセスとして起動します。Agent 定義は [`servers/local/.kiro/agents/`](../servers/local/.kiro/agents/) に、MCP ツールは [`servers/local/server_acp.py`](../servers/local/server_acp.py) に格納されています。
+`NEXT_PUBLIC_MODE=local` が設定されると、`src/app/api/` 以下の Next.js API Routes が有効になり、アクティブなデッキごとに `kiro-cli acp --agent sdpm-orchestrator` を子プロセスとして起動します。正規の Agent 定義は [`servers/local/.kiro/acp-agents/`](../servers/local/.kiro/acp-agents/) に、MCP ツールは [`servers/local/server_acp.py`](../servers/local/server_acp.py) に格納されています。
 
 ---
 

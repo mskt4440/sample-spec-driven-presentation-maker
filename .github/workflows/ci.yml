@@ -17,14 +17,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.1.0
       - name: Lint
         run: uv run ruff check sdpm/ servers/ shared/ api/ agent/
       - name: Test
         run: uv run pytest tests/ -v --cov=sdpm --cov-report=term
 
   # Local-surface guard: boots servers/local over real stdio (no mocks) and
-  # exercises filesystem-anchored resolution (templates, personas). The unit
+  # exercises filesystem-anchored resolution (templates, workflows). The unit
   # suite mocks this surface, so regressions here used to slip through.
   local-smoke:
     runs-on: ubuntu-latest
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.1.0
       - name: Smoke test local MCP server
         run: uv run python scripts/smoke_local.py
 
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.1.0
       - name: Remote server image deps resolve (mirrors servers/remote/Dockerfile)
         run: |
           uv venv /tmp/remote-check --python 3.13

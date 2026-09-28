@@ -29,10 +29,10 @@ The core presentation engine. No network, no AWS, no MCP — just Python.
 - **sdpm/sdpm/engine/** — json↔pptx conversion: builder, converter, layout engine, schema lint, preview, checks, diff, analyzer
 - **sdpm/sdpm/knowledge/** — knowledge retrieval: references (guides/workflows/examples) and asset search
 - **sdpm/sdpm/tools/** — the MCP tool contract: every tool's name, schema, docstring, and logic defined once; both servers register these functions directly
-- **sdpm/references/** — Examples (slide patterns), workflows (phase instructions), guides (design rules)
+- **sdpm/references/** — workflows (role documents: orchestrator/composer/style/translate),
+  spec (slide JSON schema), guides (design rules), examples (bundled styles)
 - **sdpm/templates/** — Sample .pptx templates (dark/light)
 - **sdpm/scripts/** — CLI entry point (`pptx_builder.py`), asset download scripts
-- **personas/** (repo root) — canonical mode behaviors (vibe / spec / style / composer), served to MCP clients via `start_presentation(mode=...)`
 
 Key capabilities:
 - Analyze any .pptx template (layouts, colors, fonts, placeholders)
@@ -48,14 +48,14 @@ Key capabilities:
 A thin bind of the `sdpm.tools` contract. Runs as a stdio server (plus an ACP variant for the local Web UI).
 
 - Registers the contract tools via FastMCP — no tool logic of its own
-- **Mode behavior via `start_presentation(mode=...)`** — any MCP client (including ones with no skill/sub-agent mechanism, e.g. Claude Desktop) receives the vibe/spec/style/composer behavior as a tool response. Clients that read MCP Server Instructions also get the workflow menu automatically.
+- **Role entry tools `start_presentation` / `start_composing` / `start_style` / `start_translation`** — any MCP client (including ones with no skill/sub-agent mechanism, e.g. Claude Desktop) gets the role document as a tool response, together with what that role reads first (style/template catalogues; the deck's specs and assigned slides; a base style). The entry is carried by the tool surface itself, so nothing depends on skills, agent definitions or MCP Server Instructions (`SDPM_DISABLE_INSTRUCTIONS=1` turns the latter off).
 - No AWS required — all files stored locally
 
 ---
 
 ## Layer 3: Remote MCP Server
 
-The same `sdpm.tools` contract bound to an HTTP transport, with storage swapped to Amazon DynamoDB + S3 plus authentication and authorization. Bundled knowledge (references, templates, personas) is baked into the container image; only user data (decks, uploads, user templates/styles) lives in S3/DynamoDB.
+The same `sdpm.tools` contract bound to an HTTP transport, with storage swapped to Amazon DynamoDB + S3 plus authentication and authorization. Bundled knowledge (references, templates) is baked into the container image; only user data (decks, uploads, user templates/styles) lives in S3/DynamoDB.
 
 ```
 MCP Client → AgentCore Runtime → MCP Server Container
@@ -165,9 +165,9 @@ The agent's system prompt is minimal — workflow knowledge is dynamically retri
 ### Slide Generation Steps
 
 1. User describes the presentation content via chat
-2. Agent calls MCP Server tools to create a deck (`init_presentation`)
+2. Agent calls MCP Server tools to create a deck (`init_deck_workspace`)
 3. Analyzes the template and retrieves available layouts (`analyze_template`)
-4. Following workflow files, designs briefing → outline → art direction (persisted to `specs/`)
+4. Following workflow files, designs briefing → art direction → outline (persisted to `specs/`)
 5. Builds slides (`run_python` to edit files in the workspace)
 6. Generates PPTX (`generate_pptx`) → saved to S3, previews generated synchronously
 7. Retrieves preview images for review (`get_preview`)
@@ -223,12 +223,13 @@ To add custom roles (e.g., team-based access), modify the `resolve_role` functio
 
 | Category | Tool | Description |
 |----------|------|-------------|
-| Workflow | `init_presentation`, `analyze_template` | Initialize deck, analyze template |
+| Prompts | `sdpm-vibe`, `sdpm-spec`, `sdpm-style`, `sdpm-translate` | User-invoked (slash-command) entry points; `vibe` / `spec` set the interaction mode |
+| Entry | `start_presentation`, `start_composing`, `start_style`, `start_translation` | Role document + what the role reads first (orchestrator, composer, style, translate) |
+| Workflow | `init_deck_workspace`, `check_specs`, `apply_style`, `analyze_template` | Create deck workspace, validate specs, apply style, analyze template |
 | Generation | `generate_pptx`, `get_preview` | Generate PPTX, get preview |
 | Assets | `search_assets`, `list_templates` | Search icons (empty query = discovery), list templates |
-| References | `list_styles`, `read_examples` | Slide style examples |
-| References | `list_workflows`, `read_workflows` | Phase workflow instructions |
-| References | `list_guides`, `read_guides` | Design rules and guides |
+| References | `list_styles` | Bundled and user styles |
+| References | `read_guides` | Design rules, guides, and the slide JSON spec (`slide-json-spec`) |
 | Layout | `grid` | CSS Grid coordinate calculation |
 | Utility | `code_to_slide` | Code highlighting |
 
@@ -257,11 +258,7 @@ Deliberate asymmetries between surfaces — these are design decisions, not gaps
   agent loop on Cloud). Plain MCP has no interaction channel, so `hearing` is
   intentionally not part of the `sdpm.tools` contract — it is a
   transport-specific addition, which the local server is allowed to carry.
-- **ACP agents have no `start_presentation`.** `start_presentation(mode=...)`
-  exists for clients where the mode is decided *in conversation*. ACP agents
-  are spawned with a fixed persona (definitions re-derived from `acp-agents/`
-  at spawn), so the mode is already known at the entry point and a mode-fetch
-  tool would be dead weight.
+- **ACP agents load fixed-role workflows directly.** Each canonical definition in `servers/local/.kiro/acp-agents/` points its `prompt` at `file://../../../../sdpm/references/workflows/<role>.md`, so the role is fixed without embedding or fetching a second copy.
 - **The CLI surface is kept even where MCP tools overlap.** The CLI +
   `sdpm/SKILL.md` form the no-MCP adapter (Layer 1). CLI subcommands cost no
   MCP schema tokens and are the only operability for agents without MCP

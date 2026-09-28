@@ -22,6 +22,12 @@ import * as path from "path";
 interface DataStackProps extends cdk.StackProps {
   /** Enable Bedrock Model Invocation Logging. Opt-in, default false. */
   enableInvocationLogging?: boolean;
+  /**
+   * Enable CloudWatch Transaction Search (X-Ray spans → `aws/spans` log group).
+   * Required for per-user token queries via GenAI Observability span attributes.
+   * Account-level setting — opt-in, default false. Skipped if already enabled.
+   */
+  enableTransactionSearch?: boolean;
 }
 
 export class DataStack extends cdk.Stack {
@@ -149,19 +155,23 @@ export class DataStack extends cdk.Stack {
       destinationKeyPrefix: "templates/",
     });
 
-    // Deploy asset icons — auto-download if not present
-    const assetsDir = path.join(__dirname, "../../sdpm/assets");
-    const scriptsDir = path.join(__dirname, "../../sdpm/scripts");
+    // Deploy asset icons — auto-download if not present.
+    // The asset root is sdpm/ (not sdpm/scripts): the download scripts import the
+    // sdpm package, so the Docker fallback needs it inside the container too.
+    const skillDir = path.join(__dirname, "../../sdpm");
+    const assetsDir = path.join(skillDir, "assets");
+    const scriptsDir = path.join(skillDir, "scripts");
     new s3deploy.BucketDeployment(this, "DeployIcons", {
       sources: [
-        s3deploy.Source.asset(scriptsDir, {
+        s3deploy.Source.asset(skillDir, {
+          exclude: ["assets/aws", "assets/material", "**/__pycache__", "**/.venv", "build", "dist"],
           bundling: {
             image: cdk.DockerImage.fromRegistry("python:3.13-slim"),
             command: [
               "bash", "-c",
-              "python3 /asset-input/download_aws_icons.py && " +
-              "python3 /asset-input/download_material_icons.py && " +
-              "cp -r /asset-input/../assets/* /asset-output/",
+              "python3 /asset-input/scripts/download_aws_icons.py && " +
+              "python3 /asset-input/scripts/download_material_icons.py && " +
+              "cp -r /asset-input/assets/* /asset-output/",
             ],
             local: {
               tryBundle(outputDir: string): boolean {
@@ -271,6 +281,47 @@ export class DataStack extends cdk.Stack {
           BedrockRoleArn: bedrockLoggingRole.roleArn,
           AccountId: this.account,
           Region: this.region,
+        },
+      });
+    }
+
+    // --- Transaction Search (optional, gated by features.enableTransactionSearch) ---
+    // Switches X-Ray span ingestion to CloudWatch Logs (`aws/spans`), enabling
+    // GenAI Observability and per-user token queries (attributes.user.id ×
+    // attributes.gen_ai.usage.*). Account-level setting — independent from
+    // invocation logging, which has different privacy characteristics
+    // (invocation logs contain prompt text; spans do not by default).
+    if (props?.enableTransactionSearch) {
+      const txSearchFn = new lambda.Function(this, "TransactionSearchFn", {
+        runtime: lambda.Runtime.PYTHON_3_13,
+        architecture: lambda.Architecture.ARM_64,
+        handler: "index.handler",
+        code: lambda.Code.fromAsset(path.join(__dirname, "..", "lambdas", "transaction-search")),
+        timeout: cdk.Duration.minutes(2),
+        logGroup: new logs.LogGroup(this, "TransactionSearchFnLogs", {
+          logGroupName: "/aws/lambda/sdpm-transaction-search",
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      });
+
+      // Account-level configuration APIs — these do not support
+      // resource-scoped ARNs, so Resource must be "*".
+      txSearchFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          "xray:GetTraceSegmentDestination",
+          "xray:UpdateTraceSegmentDestination",
+          "logs:PutResourcePolicy",
+        ],
+        resources: ["*"],
+      }));
+
+      new cdk.CustomResource(this, "TransactionSearchConfig", {
+        serviceToken: txSearchFn.functionArn,
+        properties: {
+          AccountId: this.account,
+          Region: this.region,
+          Partition: this.partition,
         },
       });
     }

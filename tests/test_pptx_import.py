@@ -22,15 +22,45 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_FIXTURE_PPTX = _REPO_ROOT / "sdpm" / "references" / "examples" / "components.pptx"
+_TEMPLATE_PPTX = _REPO_ROOT / "sdpm" / "templates" / "blank-dark.pptx"
 
 
-@pytest.fixture
-def fixture_pptx() -> Path:
-    """Return path to the bundled components.pptx fixture."""
-    if not _FIXTURE_PPTX.exists():
-        pytest.skip(f"Fixture PPTX not found: {_FIXTURE_PPTX}")
-    return _FIXTURE_PPTX
+@pytest.fixture(scope="module")
+def fixture_pptx(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build a small multi-layout deck to import (title + two content slides).
+
+    Generated from the bundled ``blank-dark`` template so the tests do not
+    depend on any reference asset; the layouts used differ so that
+    per-layout placeholder extraction has something to distinguish.
+    """
+    from sdpm.engine.builder import PPTXBuilder
+
+    builder = PPTXBuilder(
+        str(_TEMPLATE_PPTX),
+        fonts={"fullwidth": "Meiryo", "halfwidth": "Arial"},
+        default_text_color="#FFFFFF",
+    )
+    builder.add_slide({"layout": "Title Slide", "placeholders": {"0": "Import fixture", "1": "generated in tests"}})
+    builder.add_slide({
+        "layout": "Title Only",
+        "placeholders": {"0": "Cards"},
+        "elements": [
+            {"type": "shape", "shape": "rounded_rectangle", "x": 96, "y": 240, "width": 800, "height": 400,
+             "fill": "#1F2A44", "text": "Card A", "fontSize": 24},
+            {"type": "textbox", "x": 960, "y": 240, "width": 800, "height": 120, "text": "Body text", "fontSize": 18},
+            {"type": "line", "x1": 96, "y1": 700, "x2": 1760, "y2": 700, "color": "#8FA7C4", "lineWidth": 1.5},
+        ],
+        "notes": "speaker notes for the import test",
+    })
+    builder.add_slide({
+        "layout": "Blank",
+        "elements": [
+            {"type": "shape", "shape": "circle", "x": 760, "y": 340, "width": 400, "height": 400, "fill": "#FF9900"},
+        ],
+    })
+    out = tmp_path_factory.mktemp("import-fixture") / "fixture.pptx"
+    builder.save(out)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +286,7 @@ class TestCloudImportConvertedCopiesTemplate:
 
 class TestPptxBuilderCliAcceptsDeckDir:
     def test_pptx_builder_cli_generate_on_deck_dir(self, fixture_pptx: Path, tmp_path: Path) -> None:
-        """Convert PPTX → deck structure → pptx_builder.py generate should work on the directory."""
+        """Convert PPTX → deck structure → pptx_builder.py generate_pptx should work on the directory."""
         from sdpm.engine.converter import pptx_to_json
 
         deck_dir = tmp_path / "deck"
@@ -275,14 +305,14 @@ class TestPptxBuilderCliAcceptsDeckDir:
         outline_lines = [f"- [{f.stem}] Slide {f.stem}" for f in slide_files]
         (specs_dir / "outline.md").write_text("\n".join(outline_lines), encoding="utf-8")
 
-        # CLI: pptx_builder.py generate {deck_dir} -o {output}
+        # CLI: pptx_builder.py generate_pptx {deck_dir} -o {output}
         output_pptx = tmp_path / "out.pptx"
         cli = _REPO_ROOT / "sdpm" / "scripts" / "pptx_builder.py"
         proc = subprocess.run(
-            [sys.executable, str(cli), "generate", str(deck_dir), "-o", str(output_pptx)],
+            [sys.executable, str(cli), "generate_pptx", str(deck_dir), "-o", str(output_pptx)],
             capture_output=True, text=True, timeout=120,
         )
-        assert proc.returncode == 0, f"pptx_builder.py generate failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+        assert proc.returncode == 0, f"pptx_builder.py generate_pptx failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
         assert output_pptx.exists()
 
 
@@ -474,11 +504,11 @@ class TestConvertPptxOutputsTemplate:
         output_pptx = tmp_path / "out.pptx"
         cli = _REPO_ROOT / "sdpm" / "scripts" / "pptx_builder.py"
         proc = subprocess.run(
-            [sys.executable, str(cli), "generate", str(deck_dir), "-o", str(output_pptx)],
+            [sys.executable, str(cli), "generate_pptx", str(deck_dir), "-o", str(output_pptx)],
             capture_output=True, text=True, timeout=180,
         )
         assert proc.returncode == 0, (
-            f"pptx_builder.py generate failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+            f"pptx_builder.py generate_pptx failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
         )
         assert output_pptx.exists()
 

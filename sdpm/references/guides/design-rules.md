@@ -6,7 +6,7 @@ description: "Visual design principles (color, typography, effects, layout) — 
 
 ## Color
 
-Theme colors are the foundation. Check them via analyze-template's Theme Colors output.
+Theme colors are the foundation. Check them via analyze_template's Theme Colors output.
 Use theme colors as the base, extending with accent or emphasis colors as needed.
 Colors that clash with the theme break the template's visual coherence.
 
@@ -16,7 +16,7 @@ Keep the number of colors beyond background and text to the minimum needed to di
 
 Contrast ratios follow WCAG: 4.5:1 for normal text, 3:1 for large text (18pt+).
 Dark background → white text. Light background → black text.
-Theme detection: if the background color from analyze-template has low brightness, it's dark (white text); high brightness means light (black text).
+Theme detection: if the background color from analyze_template has low brightness, it's dark (white text); high brightness means light (black text).
 Don't rely on color alone to convey information — consider color vision diversity.
 
 **Constraints:**
@@ -34,14 +34,7 @@ pt is an absolute unit. The same pt renders at the same size regardless of slide
 
 ## Icons
 
-Icon size is relative, not absolute. The right size depends on what's around it.
-
-- Next to text: match the text's line height × 1.5–2. The icon should feel like part of the line, not a separate element.
-- Inside a card: scale to the card's shorter dimension. A feature card's hero icon might be 25–35% of the shorter side. A small indicator icon might be 8–12%.
-- Standalone (hero/centerpiece): scale to the available space. Fill enough to feel intentional, not lost.
-
-Don't memorize pixel values. Look at the container and the neighboring elements, then size the icon so it feels balanced.
-An icon that's too small looks like an afterthought. An icon that's too large competes with the text.
+When, how and at what size to use icons: slide-json-spec, **Visual forms**.
 
 ## Effects
 
@@ -82,6 +75,6 @@ Let the distance between elements reflect their relationship — related items c
 Balance elements vertically within the content area. Do not cluster at the top unless intentional (e.g. hero title).
 Content area: y = title bottom + margin to H−130 (H = slide height from `slideSize`).
 For 16:9 (H=1080): content area y=143–950.
-Custom templates: refer to slide size and placeholder positions from `analyze-template`.
+Custom templates: refer to slide size and placeholder positions from `analyze_template(template)`.
 
 

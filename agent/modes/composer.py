@@ -15,7 +15,8 @@ from strands.hooks.events import AfterInvocationEvent, AfterToolCallEvent, Befor
 from strands.types.tools import ToolContext
 
 from composition import resolve_parts
-from cost_logger import log_usage
+from cost_logger import log_slides_composed, log_usage
+from message_hooks import LiftToolResultImages
 from modes import MODES  # imported lazily in compose_slides if needed
 from resilience import call_tool_with_retry
 
@@ -72,75 +73,73 @@ def _is_compose_stopped(parent_tool_use_id: str) -> bool:
         return False
 
 
-def _prefetch_deck_specs(mcp_client, deck_id: str, assigned_slugs: list[str]) -> list[str]:
-    """Prefetch deck-specific specs and assigned slide contents."""
-    slugs_repr = repr(assigned_slugs)
-    code = (
-        "import json, os\n"
-        "specs = {}\n"
-        f"_assigned = set({slugs_repr})\n"
-        "for name in ['specs/brief.md', 'specs/outline.md', 'specs/art-direction.html', 'deck.json']:\n"
-        "    try:\n"
-        "        specs[name] = open(name).read()\n"
-        "    except FileNotFoundError:\n"
-        "        pass\n"
-        "if os.path.isdir('slides'):\n"
-        "    _others = []\n"
-        "    for f in sorted(os.listdir('slides')):\n"
-        "        slug = f.removesuffix('.json')\n"
-        "        if slug in _assigned:\n"
-        "            specs[f'slides/{f}'] = open(f'slides/{f}').read()\n"
-        "        else:\n"
-        "            _others.append(f)\n"
-        "    if _others:\n"
-        "        specs['slides/ (other, read via run_python if needed)'] = ', '.join(_others)\n"
-        "print(json.dumps(specs, ensure_ascii=False))\n"
-    )
+def _start_composing(mcp_client, deck_id: str, assigned_slugs: list[str]) -> dict:
+    """Call the composer's entry tool and return its ``deck`` part.
+
+    The same call an interactive composer makes first; here it is made on the
+    composer's behalf and replayed into its history as a tool result, so the
+    composer starts with its inputs already in hand (see sdpm.entry).
+    """
     result = call_tool_with_retry(
         mcp_client,
         tool_use_id=f"prefetch-{uuid.uuid4().hex[:8]}",
-        name="run_python",
-        arguments={"code": code, "deck_id": deck_id, "purpose": "prefetch deck specs"},
+        name="start_composing",
+        arguments={"deck_id": deck_id, "assigned_slugs": assigned_slugs},
     )
     if result.get("status") == "error":
-        raise RuntimeError(f"Failed to prefetch specs for deck {deck_id}: {result.get('content')}")
-
-    sections = []
+        raise RuntimeError(f"start_composing failed for deck {deck_id}: {result.get('content')}")
     for item in result.get("content", []):
         if isinstance(item, dict) and "text" in item:
-            try:
-                output = json.loads(item["text"])
-                if isinstance(output, dict) and "output" in output:
-                    output = json.loads(output["output"])
-                if not isinstance(output, dict) or not output:
-                    raise RuntimeError(f"Specs empty for deck {deck_id} — workspace may not exist")
-                for filename, content in output.items():
-                    sections.append(f"## {filename}\n\n{content}")
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"Failed to parse specs for deck {deck_id}: {e}") from e
-    return sections
+            payload = json.loads(item["text"])
+            if not payload.get("specs_ok", payload.get("deck", {}).get("specs_ok")):
+                raise RuntimeError(
+                    f"specs rejected for deck {deck_id}: {'; '.join(payload.get('errors') or [])}"
+                )
+            return payload["deck"]
+    raise RuntimeError(f"start_composing returned no payload for deck {deck_id}")
 
 
-def _build_deck_context(sections: list[str]) -> str:
-    """Build deck-specific context (varies per group, not cacheable)."""
-    if not sections:
-        return ""
-    return "# Deck-Specific References\n\n" + "\n\n---\n\n".join(sections)
+def _replay_start_composing(deck_id: str, assigned_slugs: list[str], deck: dict) -> list[dict]:
+    """assistant toolUse + user toolResult pair for a start_composing call already made."""
+    tool_use_id = f"prefill-{uuid.uuid4().hex[:8]}"
+    return [
+        {
+            "role": "assistant",
+            "content": [
+                {"text": "I'll start by loading my assignment."},
+                {"toolUse": {
+                    "toolUseId": tool_use_id,
+                    "name": "start_composing",
+                    "input": {"deck_id": deck_id, "assigned_slugs": assigned_slugs},
+                }},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"toolResult": {
+                "toolUseId": tool_use_id,
+                "content": [{"text": json.dumps({"deck": deck}, ensure_ascii=False)}],
+                "status": "success",
+            }}],
+        },
+    ]
 
 
-def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, extra_tools=None, model_id: str = ""):
+def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, extra_tools=None, model_id: str = "", user_id: str = "", session_id: str = ""):
     """Create compose_slides tool with closed-over MCP servers and model.
 
     Args:
         mcp_servers: List of MCPClient instances exposed as composer tools.
         model: BedrockModel instance.
         composer_mcp_factory: Optional callable returning a fresh MCPClient for
-            prefetch/per-group isolation. If None, falls back to mcp_servers[0]
+            prefetch/per-group isolation. Accepts the Mcp-Session-Id to use, so
+            each group gets its own microVM while keeping that id stable across
+            composes. If None, falls back to mcp_servers[0]
             (legacy shared-client behavior).
         extra_tools: Optional list of additional tools (e.g. web_fetch) to give composers.
-
-    Returns:
-        A @tool-decorated async generator function.
+        user_id: Cognito user ID, propagated to composer trace attributes and
+            usage logs for per-user measurement.
+        session_id: Runtime session ID, propagated alongside user_id.
     """
     _extra_tools = extra_tools or []
     mcp_client = mcp_servers[0] if mcp_servers else None
@@ -150,10 +149,11 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
         name="compose_slides",
         context=True,
         description=(
-            "Delegate slide generation to parallel composer agents. Each group "
-            "is handled by an independent composer that writes slides/<slug>.json. "
+            "Dispatch composer agents for the groups given — one independent composer "
+            "per group, writing slides/<slug>.json. Runs only what you pass: the layout "
+            "pass and the content pass are separate calls. "
             f"Up to {max_concurrency} groups run concurrently. "
-            "Use this once Phase 1 (dialogue) is complete and outline.md is finalized.\n\n"
+            "Use this once outline.md is finalized.\n\n"
             "The composer reads specs/ (brief, outline, art-direction) for all content "
             "and design decisions. The instruction only needs to specify which slides "
             "to compose. Add user requests or review feedback if applicable, but do NOT "
@@ -190,7 +190,8 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
                                     "type": "string",
                                     "description": (
                                         "Instruction for the composer. Keep minimal:\n"
-                                        "  • Initial generation: 'Compose these slides following specs/'\n"
+                                        "  • Layout pass (first call, one group, all slugs): 'Layout pass.'\n"
+                                        "  • Content: 'Compose these slides following specs/'\n"
                                         "  • User requests: pass through the user's words as-is\n"
                                         "  • Review fixes: describe the problem, not the solution "
                                         "(e.g. 'slides X and Y lack visual consistency' not 'use timeline layout')\n"
@@ -211,7 +212,7 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
     async def compose_slides(deck_id: str, slide_groups: list, tool_context: ToolContext):
         """Compose slides by delegating to composer agents.
 
-        Prefetches all Phase 2 references once, then injects into composer prompt.
+        Loads the canonical composer workflow, then injects deck-specific context.
         Runs groups in parallel. Async generator: yields progress dicts, then returns final result str.
         """
         # LLM sometimes passes slide_groups as a JSON string instead of a list
@@ -219,56 +220,45 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
             slide_groups = json.loads(slide_groups)
         parent_tool_use_id = tool_context.tool_use["toolUseId"]
 
-        # Pre-check: verify required spec files exist before launching composers.
-        # Missing files indicate an incomplete Phase 1 — return the earliest
-        # workflow instruction so the SPEC agent resumes from the right sub-phase.
+        # Validate the deck specification once before launching composers.
+        spec_warnings: list[str] = []
+        outline_slugs: list[str] = []
         if mcp_client:
-            check_code = (
-                "import os, json\n"
-                "files = ['specs/brief.md', 'specs/outline.md', 'deck.json']\n"
-                "art = 'specs/art-direction.html' if os.path.exists('specs/art-direction.html') "
-                "else ('specs/art-direction.md' if os.path.exists('specs/art-direction.md') else None)\n"
-                "missing = [f for f in files if not os.path.exists(f)]\n"
-                "if art is None:\n"
-                "    missing.append('specs/art-direction')\n"
-                "print(json.dumps(missing))\n"
-            )
+            assigned_slugs = [slug for group in slide_groups for slug in group["slugs"]]
             check_result = call_tool_with_retry(
                 mcp_client,
                 tool_use_id=f"precheck-{uuid.uuid4().hex[:8]}",
-                name="run_python",
-                arguments={"code": check_code, "deck_id": deck_id, "purpose": "spec file existence check"},
+                name="check_specs",
+                arguments={"deck_id": deck_id, "assigned_slugs": assigned_slugs},
             )
-            missing_files: list[str] = []
+            spec_result: dict = {
+                "ok": False,
+                "errors": ["check_specs returned no validation result"],
+                "warnings": [],
+                "slugs": [],
+            }
             for item in check_result.get("content", []):
                 if isinstance(item, dict) and "text" in item:
                     try:
-                        out = json.loads(item["text"])
-                        if isinstance(out, dict) and "output" in out:
-                            missing_files = json.loads(out["output"])
-                        elif isinstance(out, list):
-                            missing_files = out
+                        parsed = json.loads(item["text"])
                     except (json.JSONDecodeError, TypeError):
-                        pass
+                        continue
+                    if isinstance(parsed, dict):
+                        spec_result = parsed
+                        break
 
-            if missing_files:
-                # Map missing files to their workflow (phase order)
-                workflow_map = {
-                    "specs/brief.md": "create-new-1-briefing",
-                    "specs/outline.md": "create-new-1-outline",
-                    "specs/art-direction": "create-new-1-art-direction",
-                    "deck.json": "create-new-1-art-direction",
-                }
-                workflows_needed = dict.fromkeys(
-                    workflow_map[f] for f in missing_files if f in workflow_map
-                )
-                steps = " → ".join(f"`{w}`" for w in workflows_needed)
-                instruction = (
-                    f"Cannot compose: missing {missing_files}. "
-                    f"Complete these workflows in order: {steps}. "
-                    "Do NOT call compose_slides again until ALL spec files exist."
-                )
-                yield json.dumps({"status": "error", "missing_files": missing_files, "instruction": instruction})
+            spec_warnings = list(spec_result.get("warnings") or [])
+            outline_slugs = list(spec_result.get("slugs") or [])
+            if not spec_result.get("ok"):
+                yield json.dumps({
+                    "status": "error",
+                    "errors": list(spec_result.get("errors") or []),
+                    "warnings": spec_warnings,
+                    "instruction": (
+                        "Cannot compose: fix the listed spec problems, then call "
+                        "compose_slides again."
+                    ),
+                })
                 return
 
         generated = []
@@ -293,36 +283,6 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
 
             progress_q: queue.Queue = queue.Queue()
 
-            # Prefetch template analysis once (shared across all groups)
-            template_analysis = ""
-            if mcp_client:
-                try:
-                    probe = mcp_client.call_tool_sync(
-                        tool_use_id=f"prefetch-{uuid.uuid4().hex[:8]}",
-                        name="run_python",
-                        arguments={
-                            "code": "import json; print(json.load(open('deck.json')).get('template',''))",
-                            "deck_id": deck_id,
-                            "purpose": "read template name",
-                        },
-                    )
-                    tmpl_name = ""
-                    for item in probe.get("content", []):
-                        if isinstance(item, dict) and "text" in item:
-                            out = json.loads(item["text"])
-                            tmpl_name = (out.get("output", "") if isinstance(out, dict) else str(out)).strip()
-                    if tmpl_name:
-                        tmpl_result = mcp_client.call_tool_sync(
-                            tool_use_id=f"prefetch-{uuid.uuid4().hex[:8]}",
-                            name="analyze_template",
-                            arguments={"template": tmpl_name},
-                        )
-                        for item in tmpl_result.get("content", []):
-                            if isinstance(item, dict) and "text" in item:
-                                template_analysis = f"## Template Analysis: {tmpl_name}\n\n{item['text']}"
-                except Exception:
-                    pass
-
             def run_group(gi: int, group: dict) -> dict:
                 """Run a single composer group in a thread."""
                 slugs_label = ", ".join(group["slugs"])
@@ -331,26 +291,20 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
                     return {"slugs": [], "response": "skipped (cancelled)"}
                 progress_q.put_nowait({"group": gi + 1, "total_groups": len(slide_groups), "slugs": slugs_label, "status": "starting"})
 
-                deck_sections = _prefetch_deck_specs(mcp_client, deck_id, group["slugs"]) if mcp_client else []
-                deck_context = _build_deck_context(deck_sections)
-
-                slugs_list = ", ".join(f"slides/{s}.json" for s in group["slugs"])
-                tmpl_section = (
-                    f"{template_analysis}\n\n"
-                    f"When choosing layouts and referring to the template, "
-                    f"use the layout names and other information above as the source of truth.\n\n---\n\n"
-                ) if template_analysis else ""
-                user_content = (
-                    f"{deck_context}\n\n---\n\n"
-                    f"{tmpl_section}"
-                    f"## Target Deck\n"
-                    f"deck_id: {deck_id}\n"
-                    f"Use this deck_id for ALL run_python and generate_pptx calls.\n\n"
-                    f"## Your Assigned Slides\n"
-                    f"You may ONLY write to: {slugs_list}\n"
-                    f"Do NOT write to any other slides/*.json — other composers own them.\n\n"
-                    f"{group['instruction']}"
-                )
+                # The composer's history opens like an interactive composer's session:
+                # the spawn instruction, then its own start_composing call with the
+                # deck payload as the result. The run continues from there.
+                deck_part = _start_composing(mcp_client, deck_id, group["slugs"]) if mcp_client else {}
+                opening: list[dict] = [{
+                    "role": "user",
+                    "content": [{"text": (
+                        f"deck_id: {deck_id}\n"
+                        f"assigned_slugs: {', '.join(group['slugs'])}\n"
+                        f"task_instruction: {group['instruction']}"
+                    )}],
+                }]
+                if deck_part:
+                    opening.extend(_replay_start_composing(deck_id, group["slugs"], deck_part))
 
                 # Time budget: slug_count * seconds-per-slide. Periodic nudge (1st then every 3rd) to stop polishing.
                 deadline = time.time() + len(group["slugs"]) * _SECONDS_PER_SLIDE
@@ -390,7 +344,15 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
                 # Per-group MCP isolation: create a fresh MCPClient scoped to this
                 # group so a session death cannot cascade to other groups. Started
                 # here and stopped in finally after the composer run completes.
-                _group_mcp = composer_mcp_factory() if composer_mcp_factory else None
+                #
+                # The group index is part of the Mcp-Session-Id so that AgentCore
+                # still hands each group its own microVM (sharing one id across
+                # groups would route them all to the same microVM and defeat the
+                # isolation above, while they run in parallel). Keeping the id
+                # stable per group means a repeat compose in the same user session
+                # reuses that group's microVM instead of starting a new one.
+                _group_session_id = f"{session_id}-g{gi + 1}" if session_id else ""
+                _group_mcp = composer_mcp_factory(_group_session_id) if composer_mcp_factory else None
                 _group_tools = list(mcp_servers)
                 if _group_mcp is not None:
                     _group_tools[0] = _group_mcp  # replace Presentation Maker MCP
@@ -401,11 +363,15 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
                         {"text": static_prompt},
                         *([ {"cachePoint": {"type": "default"}} ] if _cache_enabled else []),
                     ],
-                    messages=list(composer_history),
+                    messages=[*composer_history, *opening],
                     tools=_group_tools,
                     model=model,
                     callback_handler=_on_event,
+                    hooks=[LiftToolResultImages()],
                     trace_attributes={
+                        "user.id": user_id,
+                        "session.id": session_id,
+                        "deck.id": deck_id,
                         "group.index": gi,
                         "group.slugs": ",".join(group["slugs"]),
                         "model.id": model_id,
@@ -487,7 +453,7 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
                 try:
                     for attempt in range(max_retries + 1):
                         try:
-                            response = composer(user_content if attempt == 0 else None)
+                            response = composer(None)  # continue from the opening history
                             if guard.cancelled:
                                 progress_q.put_nowait({
                                     "group": gi + 1, "slugs": slugs_label,
@@ -581,6 +547,12 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
             "partial": partial,
             "summaries": summaries,
         }
+        if spec_warnings:
+            report["spec_warnings"] = spec_warnings
+        log_slides_composed(
+            user_id=user_id, session_id=session_id, deck_id=deck_id,
+            generated=len(generated), total=total, status=report["status"],
+        )
         if cancelled:
             report["notice"] = (
                 "Stopped by user cancellation. Do NOT retry automatically — "
@@ -613,37 +585,14 @@ def make_compose_slides(mcp_servers: list, model, composer_mcp_factory=None, ext
             except Exception as e:
                 report["build_error"] = str(e)
 
-            # Outline check
-            try:
-                outline_result = mcp_client.call_tool_sync(
-                    tool_use_id=f"outline-{uuid.uuid4().hex[:8]}",
-                    name="run_python",
-                    arguments={
-                        "code": (
-                            "import json, re\n"
-                            "outline = open('specs/outline.md').read()\n"
-                            "slugs = re.findall(r'^-\\s*\\[([a-z0-9-]+)\\]', outline, re.MULTILINE)\n"
-                            "print(json.dumps(slugs))"
-                        ),
-                        "deck_id": deck_id,
-                        "purpose": "read outline slugs",
-                    },
-                )
-                for item in outline_result.get("content", []):
-                    if isinstance(item, dict) and "text" in item:
-                        try:
-                            output = json.loads(item["text"])
-                            if isinstance(output, dict) and "output" in output:
-                                expected = json.loads(output["output"])
-                            else:
-                                expected = output
-                            missing = [s for s in expected if s not in generated]
-                            extra = [s for s in generated if s not in expected]
-                            report["outline_check"] = {"expected": expected, "missing": missing, "extra": extra}
-                        except json.JSONDecodeError:
-                            pass
-            except Exception:
-                pass
+            # Compare generated slides with the already-validated outline slugs.
+            missing = [slug for slug in outline_slugs if slug not in generated]
+            extra = [slug for slug in generated if slug not in outline_slugs]
+            report["outline_check"] = {
+                "expected": outline_slugs,
+                "missing": missing,
+                "extra": extra,
+            }
 
         yield json.dumps(report)
 

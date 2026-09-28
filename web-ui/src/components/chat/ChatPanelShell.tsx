@@ -30,6 +30,7 @@ import { IS_LOCAL } from "@/lib/mode"
 import { notifyError } from "@/lib/errors"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { useTranslations } from "next-intl"
+import type { SessionOrigin } from "@/lib/local/kiro-sessions.types"
 
 export type ChatTabKey = "new" | "deck"
 
@@ -47,17 +48,18 @@ interface ChatPanelShellProps {
   deckId: string | null
   deckName: string | null
   chatSessionId?: string
-  slideSlugs?: string[]
+  sessionOrigin?: SessionOrigin
   onDeckCreated?: (deckId: string) => void
   onPreviewInvalidated?: () => void
   onWorkflowPhase?: (phase: string) => void
+  onLoadingChange?: (isLoading: boolean) => void
   chatRef?: React.RefObject<ChatPanelHandle | null>
   inline?: boolean
 }
 
 export function ChatPanelShell({
   open, onClose, chatTab, onChatTabChange,
-  deckId, deckName, chatSessionId, slideSlugs, onDeckCreated, onPreviewInvalidated, onWorkflowPhase, chatRef: externalChatRef,
+  deckId, deckName, chatSessionId, sessionOrigin, onDeckCreated, onPreviewInvalidated, onWorkflowPhase, onLoadingChange, chatRef: externalChatRef,
   inline = false,
 }: ChatPanelShellProps) {
   const t = useTranslations("chatShell")
@@ -213,10 +215,10 @@ export function ChatPanelShell({
             key={`a-${panelAKey}`}
             ref={panelAVisible ? chatRef : undefined}
             deckId={panelADeckId ?? "new"}
-            slideSlugs={panelAOwnsCurrentDeck ? (slideSlugs || []) : []}
             onDeckCreated={handlePanelADeckCreated}
             onPreviewInvalidated={onPreviewInvalidated}
             onWorkflowPhase={onWorkflowPhase}
+            onLoadingChange={panelAVisible ? onLoadingChange : undefined}
           />
         </div>
 
@@ -228,10 +230,11 @@ export function ChatPanelShell({
               ref={panelBVisible ? chatRef : undefined}
               deckId={deckId!}
               chatSessionId={chatSessionId}
-              slideSlugs={slideSlugs || []}
+              sessionOrigin={sessionOrigin}
               onDeckCreated={handlePanelBDeckCreated}
               onPreviewInvalidated={onPreviewInvalidated}
               onWorkflowPhase={onWorkflowPhase}
+              onLoadingChange={panelBVisible ? onLoadingChange : undefined}
             />
           </div>
         )}

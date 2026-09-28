@@ -19,10 +19,10 @@
 
 "use client"
 
-import { useState, useRef, useCallback, useEffect } from "react"
+import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import { useAuth } from "@/hooks/useAuth"
 import { AppShell } from "@/components/AppShell"
-import { DeckListView } from "@/components/deck/DeckListView"
+import { DeckListView, visibleDecks } from "@/components/deck/DeckListView"
 import { SlideCarousel } from "@/components/deck/SlideCarousel"
 import { DeckActions } from "@/components/deck/DeckActions"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
@@ -32,10 +32,14 @@ import { updateVisibility, shareDeck } from "@/services/deckService"
 import { useIsMobile } from "@/hooks/UseMobile"
 import { useSwipe } from "@/hooks/useSwipe"
 import { useDeckList } from "@/hooks/useDeckList"
+import { useDeckSelection } from "@/hooks/useDeckSelection"
+import { toast } from "sonner"
 import { useWorkspace } from "@/hooks/useWorkspace"
 import { Plus, MessageSquare, Image as ImageIcon, Star } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { IS_LOCAL } from "@/lib/mode"
+import { buildToken } from "@/lib/slashToken"
+import { OutlineChatContext } from "@/components/deck/OutlineChatContext"
 
 export default function DecksPage() {
   const t = useTranslations("decksPage")
@@ -49,6 +53,31 @@ export default function DecksPage() {
   /* ── List state (decks, search, favorites, actions) ── */
   const list = useDeckList(idToken, auth.isAuthenticated, ws.activeDeckId)
 
+  /* ── Multi-select (bulk delete) — owner tab only, list view only ── */
+  const selectableIds = useMemo(
+    () => visibleDecks(list.tabDecks, list.searchQuery).map((d) => d.deckId),
+    [list.tabDecks, list.searchQuery],
+  )
+  const selectionEnabled = ws.activeDeckId === null && list.activeListTab === "mine"
+    && (IS_LOCAL || list.searchQuery.length < 2)
+  const selection = useDeckSelection(selectableIds, selectionEnabled)
+  const deckSelection = useMemo(() => ({
+    selectionMode: selection.selectionMode,
+    selectedIds: selection.selectedIds,
+    enter: selection.enter,
+    exit: selection.exit,
+    toggle: selection.toggle,
+    selectAll: selection.selectAll,
+    onDeleteSelected: () => list.requestBulkDelete([...selection.selectedIds]),
+    progress: list.bulkProgress,
+  }), [selection, list.requestBulkDelete, list.bulkProgress])
+  const handleConfirmBulkDelete = useCallback(async () => {
+    selection.enter() // keep the bar (progress) up while selected cards disappear
+    const { failed } = await list.confirmBulkDelete()
+    if (failed > 0) toast.error(t("bulkDeleteFailed", { count: failed }))
+    selection.exit()
+  }, [list.confirmBulkDelete, selection.enter, selection.exit, t])
+
   /* ── Local UI state ── */
   const [mounted, setMounted] = useState(false)
   useEffect(() => { setMounted(true) }, [])
@@ -56,31 +85,30 @@ export default function DecksPage() {
   const [activeTab, setActiveTab] = useState<"chat" | "preview">("chat")
   const [workflowPhase, setWorkflowPhase] = useState<string | null>(null)
   const chatRef = useRef<ChatPanelHandle>(null)
+  const [agentIsLoading, setAgentIsLoading] = useState(false)
+  const outlineChatBridge = useMemo(() => ({
+    isLoading: agentIsLoading,
+    sendMessage: (text: string, options?: { displayContent?: string }) =>
+      chatRef.current?.sendMessage(text, options) ?? Promise.resolve(),
+  }), [agentIsLoading])
   const swipeRef = useSwipe(
     () => setActiveTab("preview"),
     () => setActiveTab("chat"),
   )
 
-  /** Handle inline style selection — insert message into chat input. */
+  /** Handle inline style selection — insert a `@style:<name>` token into chat input. */
   const handleStyleSelect = useCallback((name: string) => {
-    const hasArtDirection = ws.deck?.specs?.artDirection != null
-    const msg = hasArtDirection
-      ? `I want to change the style to "${name}". `
-      : `I'll use the "${name}" style. `
-    chatRef.current?.insertAtCursor(msg)
-  }, [ws.deck?.specs?.artDirection])
+    chatRef.current?.insertAtCursor(buildToken({ kind: "style", name }))
+  }, [])
 
-  /** Handle inline template selection — insert message into chat input.
-   *  isChange is true when deck.json already has a confirmed template. */
-  const handleTemplateSelect = useCallback((name: string, isChange: boolean) => {
-    const msg = isChange
-      ? `I want to change the template to "${name}". `
-      : `I'll use the "${name}" template. `
-    chatRef.current?.insertAtCursor(msg)
+  /** Handle inline template selection — insert a `@template:<name>` token into chat input. */
+  const handleTemplateSelect = useCallback((name: string) => {
+    chatRef.current?.insertAtCursor(buildToken({ kind: "template", name }))
   }, [])
 
   /* ── Render ── */
   return (
+    <OutlineChatContext.Provider value={outlineChatBridge}>
     <AppShell
       deckName={ws.isWorkspace && ws.deck ? ws.deck.name : undefined}
       onBack={ws.isWorkspace ? ws.navigateToList : undefined}
@@ -129,9 +157,10 @@ export default function DecksPage() {
                     deckId={ws.isWorkspace ? (ws.isNew ? (ws.createdDeckId ?? null) : ws.activeDeckId) : null}
                     deckName={ws.deck?.name || null}
                     chatSessionId={ws.deck?.chatSessionId}
-                    slideSlugs={ws.deck?.slides.map(s => s.slug || "") || []}
+                    sessionOrigin={ws.deck?.sessionOrigin}
                     onDeckCreated={ws.handleDeckCreated} onPreviewInvalidated={() => ws.setPptxRequested(true)}
                     onWorkflowPhase={setWorkflowPhase}
+                    onLoadingChange={setAgentIsLoading}
                     inline
                   />
                 ) : (
@@ -217,6 +246,7 @@ export default function DecksPage() {
                 onDownload={list.handleDownload}
                 onOpenFolder={list.handleOpenFolder}
                 loading={list.loading}
+                selection={deckSelection}
               />
               {list.error && (
                 <div className="max-w-5xl mx-auto px-5 sm:px-8">
@@ -240,9 +270,10 @@ export default function DecksPage() {
             deckId={ws.isWorkspace ? (ws.isNew ? (ws.createdDeckId ?? null) : ws.activeDeckId) : null}
             deckName={ws.deck?.name || null}
             chatSessionId={ws.deck?.chatSessionId}
-            slideSlugs={ws.deck?.slides.map(s => s.slug || "") || []}
+            sessionOrigin={ws.deck?.sessionOrigin}
             onDeckCreated={ws.handleDeckCreated} onPreviewInvalidated={() => ws.setPptxRequested(true)}
             onWorkflowPhase={setWorkflowPhase}
+            onLoadingChange={setAgentIsLoading}
           />
         )}
       </div>
@@ -255,6 +286,16 @@ export default function DecksPage() {
         confirmLabel={t("delete")}
         variant="destructive"
         onConfirm={list.confirmDelete}
+      />
+
+      <ConfirmDialog
+        open={!!list.bulkDeleteTargets}
+        onOpenChange={(open) => { if (!open && !list.bulkProgress) list.setBulkDeleteTargets(null) }}
+        title={t("bulkDeleteTitle", { count: list.bulkDeleteTargets?.length ?? 0 })}
+        description={IS_LOCAL ? t("bulkDeleteDescriptionLocal") : t("bulkDeleteDescription")}
+        confirmLabel={t("delete")}
+        variant="destructive"
+        onConfirm={handleConfirmBulkDelete}
       />
 
       {isMobile && !ws.isWorkspace && (
@@ -285,5 +326,6 @@ export default function DecksPage() {
       )}
 
     </AppShell>
+    </OutlineChatContext.Provider>
   )
 }

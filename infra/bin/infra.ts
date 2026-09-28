@@ -46,7 +46,7 @@ const env = {
 const externalOidc = config.auth?.oidcDiscoveryUrl;
 const externalClients = config.auth?.allowedClients;
 
-let oidcDiscoveryUrl: string;
+let oidcDiscoveryUrl: string | undefined;
 let allowedClients: string[];
 let authStack: AuthStack | undefined;
 
@@ -61,8 +61,13 @@ if (externalOidc && externalClients) {
     description: "Spec-Driven Presentation Maker - Auth (uksb-ynuz0lkrea)(tag:auth)",
     mcpCallbackUrls: config.auth?.mcpCallbackUrls,
   });
-  oidcDiscoveryUrl = authStack.oidcDiscoveryUrl;
-  allowedClients = [authStack.clientId];
+  // In AuthStack mode, downstream stacks read Auth values (oidcDiscoveryUrl,
+  // WebClient ID, MCP custom scope, etc.) from SSM Parameter Store published
+  // by AuthStack. Keeping these undefined / empty here prevents CDK from
+  // emitting auto-generated cross-stack exports that would collide with the
+  // retained legacy exports in AuthStack.
+  oidcDiscoveryUrl = undefined;
+  allowedClients = [];
 }
 
 // --- Required stacks ---
@@ -86,7 +91,9 @@ if (config.features?.observability !== undefined) {
   }
 }
 
-const data = new DataStack(app, "SdpmData", { env, enableInvocationLogging, description: "Spec-Driven Presentation Maker - Data (uksb-ynuz0lkrea)(tag:data)" });
+const enableTransactionSearch = config.features?.enableTransactionSearch === true;
+
+const data = new DataStack(app, "SdpmData", { env, enableInvocationLogging, enableTransactionSearch, description: "Spec-Driven Presentation Maker - Data (uksb-ynuz0lkrea)(tag:data)" });
 
 const runtime = new RuntimeStack(app, "SdpmRuntime", {
   env,
@@ -94,21 +101,28 @@ const runtime = new RuntimeStack(app, "SdpmRuntime", {
   table: data.table,
   pptxBucket: data.pptxBucket,
   resourceBucket: data.resourceBucket,
-  oidcDiscoveryUrl,
-  allowedClients: authStack
-    ? [authStack.clientId, ...(authStack.mcpClientId ? [authStack.mcpClientId] : [])]
-    : allowedClients,
+  // oidcDiscoveryUrl is used only when useAuthStack=false (external IdP).
+  // In AuthStack mode, the value is read from SSM.
+  oidcDiscoveryUrl: authStack ? undefined : oidcDiscoveryUrl,
+  // allowedClients is used only when useAuthStack=false (external IdP).
+  // In AuthStack mode, RuntimeStack reads the MCP custom scope from SSM and
+  // uses it as allowedScopes instead. Passing authStack.clientId here would
+  // cause CDK to emit an auto-generated cross-stack export which would
+  // collide with the legacy exports retained in AuthStack.
+  allowedClients: authStack ? [] : allowedClients,
   kbSsmParamName: data.kbSsmParamName || undefined,
   vectorBucketName: data.vectorBucketName || undefined,
   vectorIndexName: data.vectorIndexName || undefined,
-  userPoolId: authStack?.userPool.userPoolId,
-  cognitoDomainPrefix: authStack?.cognitoDomainPrefix,
-  mcpClientId: authStack?.mcpClientId || undefined,
-  mcpCustomScope: authStack?.mcpCustomScope,
+  useAuthStack: !!authStack,
   enableDCR: config.auth?.enableDCR !== false,
-  // Prefer allowedScopes (works with DCR); fall back to allowedClients for external IdP.
-  allowedScopes: authStack?.mcpCustomScope ? [authStack.mcpCustomScope] : undefined,
 });
+// When AuthStack is present, explicitly declare the dependency so that SSM
+// parameters published by AuthStack exist before RuntimeStack reads them.
+// This replaces the implicit dependency that CDK used to infer from
+// cross-stack construct references.
+if (authStack) {
+  runtime.addDependency(authStack);
+}
 
 // --- Model configuration & validation ---
 const defaultChatModelId: string = config.model?.defaults?.chat ?? "global.anthropic.claude-sonnet-4-6";
@@ -145,11 +159,43 @@ if (allowedModelIds.length > 0) {
   }
 }
 
+// Optional operator-curated "Recommended" group shown first in the model
+// picker. Everything else in allowedModelIds falls under "Other models".
+// Omit (or leave empty) to keep a flat list.
+const recommendedModelIds: string[] = config.model?.recommendedModelIds ?? [];
+
+if (recommendedModelIds.length > 0) {
+  const seenRecommended = new Set<string>();
+  for (const id of recommendedModelIds) {
+    if (seenRecommended.has(id)) {
+      throw new Error(`Config error: model.recommendedModelIds contains duplicate "${id}".`);
+    }
+    seenRecommended.add(id);
+    if (!allowedModelIds.includes(id)) {
+      throw new Error(
+        `Config error: model.recommendedModelIds entry "${id}" is not in model.allowedModelIds. ` +
+        `Recommended models must also be allowed.`,
+      );
+    }
+  }
+  // The defaults must sit in the Recommended group; otherwise the pre-selected
+  // model would be listed under "Other models", which reads as a contradiction.
+  for (const [key, id] of [["chat", defaultChatModelId], ["create", defaultCreateModelId]] as const) {
+    if (!recommendedModelIds.includes(id)) {
+      throw new Error(
+        `Config error: model.defaults.${key} "${id}" is not in model.recommendedModelIds. ` +
+        `Add it to recommendedModelIds, or remove recommendedModelIds for a flat list.`,
+      );
+    }
+  }
+}
+
 const allowedModels = allowedModelIds.map((id) => ({
   modelId: id,
   displayName: MODEL_METADATA[id].displayName,
   description: MODEL_METADATA[id].description,
   composable: MODEL_METADATA[id].composable !== false,
+  recommended: recommendedModelIds.includes(id),
 }));
 
 // --- WAF IP restriction (optional) ---
@@ -175,18 +221,24 @@ if (config.stacks?.agent) {
     table: data.table,
     pptxBucket: data.pptxBucket,
     mcpRuntimeArn: runtime.runtimeArn,
-    oidcDiscoveryUrl,
+    oidcDiscoveryUrl: authStack ? undefined : oidcDiscoveryUrl,
     allowedClients,
+    useAuthStack: !!authStack,
     chatModelId: defaultChatModelId,
     createModelId: defaultCreateModelId,
     allowedModelIds,
   });
+  // AgentStack reads the WebClient ID from SSM in AuthStack mode.
+  // Ensure AuthStack deploys first.
+  if (authStack) {
+    agent.addDependency(authStack);
+  }
 
   if (config.stacks?.webUi) {
     if (!authStack) {
       throw new Error("WebUiStack requires AuthStack (default Cognito). Remove auth.oidcDiscoveryUrl from config.yaml to use default Cognito, or deploy Web UI separately.");
     }
-    new WebUiStack(app, "SdpmWebUi", {
+    const webUi = new WebUiStack(app, "SdpmWebUi", {
       env,
       crossRegionReferences: wafEnabled,
       description: "Spec-Driven Presentation Maker - Web UI (uksb-ynuz0lkrea)(tag:web-ui)",
@@ -194,8 +246,6 @@ if (config.stacks?.agent) {
       pptxBucket: data.pptxBucket,
       resourceBucket: data.resourceBucket,
       agentRuntimeArn: agent.agentRuntimeArn,
-      userPool: authStack.userPool,
-      userPoolClient: authStack.userPoolClient,
       memoryId: agent.memoryId,
       kbId: data.kbSsmParamName,
       vectorBucketName: data.vectorBucketName || undefined,
@@ -206,7 +256,9 @@ if (config.stacks?.agent) {
       defaultChatModelId,
       defaultCreateModelId,
       allowedModels,
-      mcpCustomScope: authStack.mcpCustomScope,
     });
+    // WebUiStack reads Cognito values from SSM parameters published by
+    // AuthStack. Ensure AuthStack deploys first.
+    webUi.addDependency(authStack);
   }
 }

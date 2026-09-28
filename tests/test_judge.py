@@ -5,7 +5,7 @@
 Fixtures are minimal SVG documents mirroring real LibreOffice 26.x export
 structure (Slide/Page groups, TextPosition tspans with textLength,
 BoundingBox rects, shadow groups, fill-opacity). Calibration against the
-official reference decks (components.pptx / patterns.pptx) is a local-only
+official component reference deck is a local-only
 step recorded in the spec notes; these tests pin the judgment logic.
 """
 
@@ -170,7 +170,7 @@ class TestContrast:
 
     def test_translucent_fill_composited(self, tmp_path):
         # white fill at 0.078 opacity over dark bg renders dark — white text
-        # on it is readable, must NOT flag (components.pptx card pattern)
+        # on it is readable, must NOT flag (translucent card pattern)
         body = _shape_with_text(
             "Card title", "rgb(255,255,255)",
             fx=2000, fy=2000, fw=15000, fh=6000,

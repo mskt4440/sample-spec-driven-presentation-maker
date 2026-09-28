@@ -30,13 +30,13 @@ kiro-cli agent list | grep design-reviewer
 
 ```bash
 # Check pptx_builder.py works
-uv run python3 scripts/pptx_builder.py examples
+uv run python3 scripts/pptx_builder.py list_templates
 
 # Check icon search works
-uv run python3 scripts/pptx_builder.py icon-search "lambda"
+uv run python3 scripts/pptx_builder.py search_assets "lambda"
 
 # Check init works
-uv run python3 scripts/pptx_builder.py init -o /tmp/test-pptx && rm -rf /tmp/test-pptx
+uv run python3 scripts/pptx_builder.py init_deck_workspace -o /tmp/test-pptx && rm -rf /tmp/test-pptx
 ```
 
 ## Troubleshooting

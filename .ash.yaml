@@ -11,6 +11,18 @@ global_settings:
       reason: "Local agent specs/steering — not shipped code, gitignored"
 
   suppressions:
+    # --- Bundled styles: inline SVG icon symbols ---
+    # The aws-* styles embed official AWS architecture icons as inline <symbol>s (the
+    # gallery renders each style standalone, so assets cannot be linked). Their long
+    # path data trips the base64 entropy detector; it is vector geometry, not a secret.
+
+    - rule_id: "SECRET-BASE64-HIGH-ENTROPY-STRING"
+      path: "sdpm/references/examples/styles/aws-*.html"
+      reason: >
+        Inline SVG path data of official AWS architecture icons copied from the asset
+        catalog (search_assets names). Vector geometry, not credentials.
+      expiration: "2027-09-27"
+
     # --- CFn Custom Resource: urlopen to pre-signed ResponseURL ---
     # Standard pattern for CloudFormation custom resources.
     # The URL is the CFn-provided ResponseURL, not user-controlled.
@@ -29,6 +41,13 @@ global_settings:
         to the pre-signed ResponseURL. Standard CFn pattern. URL is not user-controlled.
       expiration: "2027-03-29"
 
+    - rule_id: "B310"
+      path: "infra/lambdas/transaction-search/index.py"
+      reason: >
+        urllib.request.urlopen sends CloudFormation custom resource response
+        to the pre-signed ResponseURL. Standard CFn pattern. URL is not user-controlled.
+      expiration: "2027-03-29"
+
     - rule_id: "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected"
       path: "infra/lambdas/kb-provisioner/index.py"
       reason: >
@@ -37,6 +56,12 @@ global_settings:
 
     - rule_id: "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected"
       path: "infra/lambdas/bedrock-logging/index.py"
+      reason: >
+        Same as B310 above. CFn custom resource ResponseURL pattern.
+      expiration: "2027-03-29"
+
+    - rule_id: "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected"
+      path: "infra/lambdas/transaction-search/index.py"
       reason: >
         Same as B310 above. CFn custom resource ResponseURL pattern.
       expiration: "2027-03-29"
@@ -304,16 +329,6 @@ global_settings:
         workflow_dispatch inputs (pr_numbers, blog_theme) are required for
         PR selection. Inputs are used only via env: variables to prevent
         shell injection. Not a supply chain concern.
-      expiration: "2027-03-29"
-
-    # --- detect-secrets: dummy API key for bedrock-mantle SigV4 adapter ---
-
-    - rule_id: "SECRET-SECRET-KEYWORD"
-      path: "agent/mantle_client.py"
-      reason: >
-        api_key="unused" is a dummy value required by the openai SDK constructor.
-        Bedrock-mantle uses SigV4 authentication, not API keys. The value is
-        never sent to any endpoint (SigV4Transport replaces auth headers).
       expiration: "2027-03-29"
 
     # --- GitHub Actions mutable action tags ---

@@ -14,7 +14,7 @@ from tools.deck import create_deck
 _SPEC_FILES_ALWAYS = ("specs/brief.md", "specs/outline.md")
 
 
-def init_presentation(
+def init_deck_workspace(
     name: str,
     user_id: str,
     storage: Storage,
@@ -36,8 +36,10 @@ def init_presentation(
     deck = create_deck(name=name, user_id=user_id, storage=storage)
     deck_id = deck["deckId"]
 
-    # Write empty deck.json to S3
-    deck_json: dict[str, Any] = {}
+    # Write the shared deck.json skeleton to S3.
+    from sdpm.engine.schema import DECK_JSON_SKELETON, complete_deck_skeleton
+
+    deck_json: dict[str, Any] = complete_deck_skeleton(DECK_JSON_SKELETON)
     storage.put_deck_json(deck_id=deck_id, data=deck_json)
 
     workspace = ["deck.json"]

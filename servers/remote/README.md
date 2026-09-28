@@ -7,8 +7,10 @@ Remote MCP server for Amazon Bedrock AgentCore Runtime. Provides all spec-driven
 ### Workflow
 | Tool | Description |
 |------|-------------|
-| `start_presentation` | Start creating — returns design rules + Phase 1a workflow |
-| `init_presentation` | Create deck + associate template |
+| `start_presentation` | Entry point — orchestrator role document + styles and templates |
+| `start_composing` | Composer entry — role document, slide spec, and the deck's specs and assigned slides |
+| `start_style` | Style entry — role document, style catalogue, a base style's HTML |
+| `init_deck_workspace` | Create an empty deck workspace |
 | `analyze_template` | Get pre-analyzed template info (layouts, colors, fonts) |
 
 ### Deck CRUD
@@ -33,15 +35,13 @@ Remote MCP server for Amazon Bedrock AgentCore Runtime. Provides all spec-driven
 ### References
 | Tool | Description |
 |------|-------------|
-| `list_examples` / `read_examples` | Design pattern and component examples |
-| `list_workflows` / `read_workflows` | Phase-by-phase workflow instructions |
-| `list_guides` / `read_guides` | Design rules and review checklists |
+| `read_guides` | Design rules and review checklists |
 
 ### Utility
 | Tool | Description |
 |------|-------------|
 | `list_templates` | List available templates |
-| `code_block` | Generate syntax-highlighted code block JSON |
+| `code_to_slide` | Generate syntax-highlighted code block JSON |
 | `read_attachment` | Read content from an attached file with byte-offset paging |
 | `import_attachment` | Import file into deck workspace |
 | `search_slides` | Semantic slide search (optional, requires Amazon Bedrock KB) |
